@@ -1,0 +1,275 @@
+{
+  "rabbit_version": "3.13.0",
+  "rabbitmq_version": "3.13.0",
+  "product_name": "RabbitMQ",
+  "users": [
+    {
+      "name": "rvp",
+      "password_hash": "",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    { "name": "/" }
+  ],
+  "permissions": [
+    {
+      "user": "rvp",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "rvp.releases",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "rvp.sandbox",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "rvp.tests",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "rvp.ai",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "rvp.notify",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "rvp.dlx",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "releases.orchestrator",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "releases.ai-agent",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "sandbox.queue",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-max-priority": 10,
+        "x-dead-letter-exchange": "rvp.dlx",
+        "x-dead-letter-routing-key": "sandbox.queue.dlq",
+        "x-message-ttl": 1800000
+      }
+    },
+    {
+      "name": "sandbox.queue.dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "sandbox.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "tests.commands",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "tests.results",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "rvp.dlx",
+        "x-dead-letter-routing-key": "tests.results.dlq"
+      }
+    },
+    {
+      "name": "tests.results.dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "ai.requests",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "ai.results",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "notify.discord",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "notify.dashboard",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "rvp.releases",
+      "vhost": "/",
+      "destination": "releases.orchestrator",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.releases",
+      "vhost": "/",
+      "destination": "releases.ai-agent",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.sandbox",
+      "vhost": "/",
+      "destination": "sandbox.queue",
+      "destination_type": "queue",
+      "routing_key": "sandbox.queue",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.sandbox",
+      "vhost": "/",
+      "destination": "sandbox.events",
+      "destination_type": "queue",
+      "routing_key": "sandbox.events",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.tests",
+      "vhost": "/",
+      "destination": "tests.commands",
+      "destination_type": "queue",
+      "routing_key": "tests.commands",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.tests",
+      "vhost": "/",
+      "destination": "tests.results",
+      "destination_type": "queue",
+      "routing_key": "tests.results",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.ai",
+      "vhost": "/",
+      "destination": "ai.requests",
+      "destination_type": "queue",
+      "routing_key": "ai.requests",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.ai",
+      "vhost": "/",
+      "destination": "ai.results",
+      "destination_type": "queue",
+      "routing_key": "ai.results",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.notify",
+      "vhost": "/",
+      "destination": "notify.discord",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.notify",
+      "vhost": "/",
+      "destination": "notify.dashboard",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.dlx",
+      "vhost": "/",
+      "destination": "sandbox.queue.dlq",
+      "destination_type": "queue",
+      "routing_key": "sandbox.queue.dlq",
+      "arguments": {}
+    },
+    {
+      "source": "rvp.dlx",
+      "vhost": "/",
+      "destination": "tests.results.dlq",
+      "destination_type": "queue",
+      "routing_key": "tests.results.dlq",
+      "arguments": {}
+    }
+  ],
+  "policies": [],
+  "parameters": [],
+  "global_parameters": [
+    {
+      "name": "cluster_name",
+      "value": "cartesi-rvp"
+    }
+  ]
+}
