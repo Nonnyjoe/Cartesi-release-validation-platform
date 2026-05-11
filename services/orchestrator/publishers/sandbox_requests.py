@@ -1,0 +1,48 @@
+"""
+services/orchestrator/publishers/sandbox_requests.py
+Publishes SandboxRequest messages to rvp.sandbox → sandbox.queue (priority queue).
+"""
+import json
+import logging
+import os
+from datetime import datetime, timezone
+
+import aio_pika
+
+log = logging.getLogger("orchestrator.pub.sandbox")
+RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:5672/")
+
+
+async def publish_sandbox_request(
+    run_id: str,
+    release_tag: str,
+    image_tag: str,
+    priority: int = 5,
+    requested_by: str | None = None,
+):
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.get_exchange("rvp.sandbox")
+
+        body = json.dumps({
+            "event_id":     __import__("uuid").uuid4().__str__(),
+            "run_id":       run_id,
+            "service":      "orchestrator",
+            "ts":           datetime.now(tz=timezone.utc).isoformat(),
+            "release_tag":  release_tag,
+            "image_tag":    image_tag,
+            "priority":     priority,
+            "requested_by": requested_by,
+        }).encode()
+
+        await exchange.publish(
+            aio_pika.Message(
+                body=body,
+                content_type="application/json",
+                priority=priority,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            ),
+            routing_key="sandbox.queue",
+        )
+        log.info("Published sandbox request for run %s (priority=%d)", run_id, priority)
