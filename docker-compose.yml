@@ -1,0 +1,225 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+#  Cartesi RVP — docker-compose.yml
+#  Single command: docker compose up --build
+# ─────────────────────────────────────────────
+
+networks:
+  rvp-internal:
+    driver: bridge
+  rvp-public:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  redis-data:
+
+services:
+
+  # ─────────────────────────────────────────
+  #  INFRASTRUCTURE
+  # ─────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rvp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-rvp}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - rvp-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rvp} -d ${POSTGRES_DB:-rvp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-rvp}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./infra/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./infra/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - rvp-internal
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - rvp-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  #  APPLICATION SERVICES
+  # ─────────────────────────────────────────
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8000:8000"
+    networks:
+      - rvp-internal
+      - rvp-public
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+
+  sandbox-manager:
+    build:
+      context: ./services/sandbox-manager
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+      MAX_SANDBOXES: ${MAX_SANDBOXES:-5}
+      SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-2}
+      SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-4g}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./shared:/app/shared:ro
+    networks:
+      - rvp-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  test-runner:
+    build:
+      context: ./services/test-runner
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+    volumes:
+      - ./shared:/app/shared:ro
+    networks:
+      - rvp-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  ai-agent:
+    build:
+      context: ./services/ai-agent
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ./shared:/app/shared:ro
+    networks:
+      - rvp-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  github-watcher:
+    build:
+      context: ./services/github-watcher
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
+    volumes:
+      - ./shared:/app/shared:ro
+    networks:
+      - rvp-internal
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  notifier:
+    build:
+      context: ./services/notifier
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+    volumes:
+      - ./shared:/app/shared:ro
+    networks:
+      - rvp-internal
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: ./services/dashboard
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      VITE_ORCHESTRATOR_URL: http://localhost:8000
+      VITE_WS_URL: ws://localhost:8000/ws
+    ports:
+      - "3000:80"
+    networks:
+      - rvp-internal
+      - rvp-public
+    depends_on:
+      - orchestrator
