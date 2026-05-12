@@ -1,0 +1,42 @@
+{
+  "components": {
+    "dispatcher": {
+      "description": "Watches InputBox for new inputs, forwards to Cartesi Machine",
+      "container_name_pattern": "rvp-node-{sandbox_id}",
+      "log_keywords": ["input accepted", "processing input", "advance state"],
+      "failure_indicators": ["failed to process input", "panic", "connection refused"]
+    },
+    "authority-claimer": {
+      "description": "Closes epochs and submits claims to consensus contract",
+      "container_name_pattern": "rvp-node-{sandbox_id}",
+      "log_keywords": ["epoch closed", "claim submitted", "submitting claim"],
+      "failure_indicators": ["claim failed", "failed to submit", "epoch error"]
+    },
+    "graphql-server": {
+      "description": "GraphQL indexer and query server",
+      "container_name_pattern": "rvp-node-{sandbox_id}",
+      "log_keywords": ["graphql server started", "indexed input"],
+      "failure_indicators": ["graphql error", "indexing failed"]
+    },
+    "inspect-server": {
+      "description": "Synchronous REST inspect-state endpoint",
+      "container_name_pattern": "rvp-node-{sandbox_id}",
+      "log_keywords": ["inspect request", "inspect response"],
+      "failure_indicators": ["inspect failed", "machine error"]
+    },
+    "anvil": {
+      "description": "Local Ethereum node (Foundry Anvil) simulating L1",
+      "container_name_pattern": "rvp-anvil-{sandbox_id}",
+      "log_keywords": ["eth_sendRawTransaction", "mined"],
+      "failure_indicators": ["panic", "out of memory"]
+    }
+  },
+  "contracts": {
+    "InputBox": "0x59b22D57D4f067708AB0c00552767405926dc768",
+    "CartesiDApp": "0x0000000000000000000000000000000000000001",
+    "Authority": "0x0000000000000000000000000000000000000002"
+  },
+  "epoch_length_blocks": 7200,
+  "default_chain_id": 31337,
+  "default_mnemonic": "test test test test test test test test test test test junk"
+}

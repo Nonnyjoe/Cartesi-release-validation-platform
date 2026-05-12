@@ -1,0 +1,141 @@
+# Cartesi Rollups Node — GraphQL Schema Reference
+
+type Query {
+  inputs(first: Int, after: String, filter: InputFilter): InputConnection!
+  vouchers(first: Int, after: String, filter: OutputFilter): VoucherConnection!
+  notices(first: Int, after: String, filter: OutputFilter): NoticeConnection!
+  reports(first: Int, after: String, filter: OutputFilter): ReportConnection!
+  epochs(first: Int, after: String): EpochConnection!
+  input(index: Int!): Input
+  voucher(inputIndex: Int!, voucherIndex: Int!): Voucher
+}
+
+type Input {
+  index:     Int!
+  payload:   String!    # hex-encoded
+  sender:    String!    # EVM address
+  blockNumber: Int!
+  timestamp:   Int!
+  notices:   NoticeConnection!
+  vouchers:  VoucherConnection!
+  reports:   ReportConnection!
+}
+
+type Voucher {
+  index:       Int!
+  input:       Input!
+  destination: String!  # EVM address
+  payload:     String!  # hex-encoded calldata
+  proof:       Proof    # null until epoch is claimed
+}
+
+type Notice {
+  index:   Int!
+  input:   Input!
+  payload: String!
+  proof:   Proof
+}
+
+type Report {
+  index:   Int!
+  input:   Input!
+  payload: String!
+}
+
+type Epoch {
+  index:  Int!
+  status: EpochStatus!
+  inputs: InputConnection!
+}
+
+enum EpochStatus {
+  OPEN
+  CLOSED
+  CLAIMED
+}
+
+type Proof {
+  validity: OutputValidityProof!
+  context:  String!
+}
+
+type OutputValidityProof {
+  inputIndexWithinEpoch:    Int!
+  outputIndexWithinInput:   Int!
+  outputHashesRootHash:     String!
+  vouchersEpochRootHash:    String!
+  noticesEpochRootHash:     String!
+  machineStateHash:         String!
+  outputHashInOutputHashesSiblings: [String!]!
+  outputHashesInEpochSiblings:      [String!]!
+}
+
+type InputConnection {
+  totalCount: Int!
+  edges: [InputEdge!]!
+  pageInfo: PageInfo!
+}
+
+type InputEdge {
+  node:   Input!
+  cursor: String!
+}
+
+type VoucherConnection {
+  totalCount: Int!
+  edges: [VoucherEdge!]!
+  pageInfo: PageInfo!
+}
+
+type VoucherEdge {
+  node:   Voucher!
+  cursor: String!
+}
+
+type NoticeConnection {
+  totalCount: Int!
+  edges: [NoticeEdge!]!
+  pageInfo: PageInfo!
+}
+
+type NoticeEdge {
+  node:   Notice!
+  cursor: String!
+}
+
+type ReportConnection {
+  totalCount: Int!
+  edges: [ReportEdge!]!
+  pageInfo: PageInfo!
+}
+
+type ReportEdge {
+  node:   Report!
+  cursor: String!
+}
+
+type EpochConnection {
+  edges: [EpochEdge!]!
+  pageInfo: PageInfo!
+}
+
+type EpochEdge {
+  node:   Epoch!
+  cursor: String!
+}
+
+type PageInfo {
+  startCursor:     String
+  endCursor:       String
+  hasNextPage:     Boolean!
+  hasPreviousPage: Boolean!
+}
+
+input InputFilter {
+  indexLowerThan:   Int
+  indexGreaterThan: Int
+}
+
+input OutputFilter {
+  inputIndex: Int
+}

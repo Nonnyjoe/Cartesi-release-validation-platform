@@ -1,0 +1,55 @@
+openapi: "3.0.0"
+info:
+  title: Cartesi Rollups Inspect API
+  version: "1.0"
+  description: >
+    Synchronous inspect-state endpoint. Does not produce L1 transactions.
+    The dApp receives the payload and can return reports reflecting current state.
+
+servers:
+  - url: "http://localhost:5004"
+
+paths:
+  /inspect/{payload}:
+    get:
+      summary: Inspect dApp state
+      description: >
+        Sends an inspect request with the given hex payload. The Cartesi Machine
+        processes it in a read-only context and returns reports.
+      parameters:
+        - name: payload
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Hex-encoded payload (e.g. "0x" for empty)
+      responses:
+        "200":
+          description: Inspect completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [Accepted, Rejected, Exception, MachineHalted, CycleLimitExceeded, TimeLimitExceeded, PayloadLengthLimitExceeded]
+                  exception_payload:
+                    type: string
+                    nullable: true
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        payload:
+                          type: string
+                  processed_input_count:
+                    type: integer
+
+  /healthz:
+    get:
+      summary: Node health check
+      responses:
+        "200":
+          description: Node is healthy
