@@ -13,6 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes.runs import router as runs_router
 from api.routes.sandboxes import router as sandboxes_router
 from api.routes.reports import router as reports_router
+from api.routes.tests import router as tests_router
+from api.routes.sessions import router as sessions_router
+from api.routes.queues import router as queues_router
+from api.routes.health import router as health_router
 from api.websocket import router as ws_router
 from consumers.sandbox_events import SandboxEventConsumer
 from consumers.test_results import TestResultConsumer
@@ -72,8 +76,9 @@ app.include_router(runs_router,       prefix="/runs",       tags=["runs"])
 app.include_router(sandboxes_router,  prefix="/sandboxes",  tags=["sandboxes"])
 app.include_router(reports_router,    prefix="/reports",    tags=["reports"])
 app.include_router(ws_router,         prefix="/ws",         tags=["websocket"])
+app.include_router(tests_router,      prefix="/tests",      tags=["tests"])
+app.include_router(sessions_router,   prefix="/sessions",   tags=["sessions"])
+app.include_router(queues_router,     prefix="/queues",     tags=["queues"])
+app.include_router(health_router)
 
 
-@app.get("/healthz", tags=["health"])
-async def health():
-    return {"status": "ok", "service": "orchestrator"}
