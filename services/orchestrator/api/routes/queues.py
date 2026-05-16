@@ -3,15 +3,20 @@ GET /queues — return RabbitMQ queue depths by querying the management API
 """
 from fastapi import APIRouter
 from datetime import datetime, timezone
+from urllib.parse import urlparse, quote
 import os, httpx
 
-router = APIRouter(prefix="/queues", tags=["queues"])
+router = APIRouter(tags=["queues"])
 
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
+# Parse credentials from RABBITMQ_URL (set by docker-compose)
+_rmq_url = os.getenv("RABBITMQ_URL", "amqp://rvp:changeme@rabbitmq:5672/")
+_parsed  = urlparse(_rmq_url)
+RABBITMQ_HOST      = os.getenv("RABBITMQ_HOST", _parsed.hostname or "rabbitmq")
 RABBITMQ_MGMT_PORT = int(os.getenv("RABBITMQ_MGMT_PORT", "15672"))
-RABBITMQ_USER = os.getenv("RABBITMQ_USER", "rvp")
-RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "rvp_secret")
-RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "rvp")
+RABBITMQ_USER      = _parsed.username or "rvp"
+RABBITMQ_PASS      = _parsed.password or "changeme"
+# Default vhost is "/" — URL-encode it as %2F for the management API
+RABBITMQ_VHOST     = os.getenv("RABBITMQ_VHOST", "%2F")
 
 MGMT_URL = f"http://{RABBITMQ_HOST}:{RABBITMQ_MGMT_PORT}/api/queues/{RABBITMQ_VHOST}"
 

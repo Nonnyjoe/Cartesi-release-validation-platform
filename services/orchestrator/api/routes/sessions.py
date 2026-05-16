@@ -15,10 +15,10 @@ from typing import Optional
 import uuid, json
 from datetime import datetime, timezone
 
-from ...database import get_db
-from ...publishers.ai import AIPublisher
+from db import get_db
+from publishers.ai import AIPublisher
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(tags=["sessions"])
 
 
 class SessionCreateIn(BaseModel):

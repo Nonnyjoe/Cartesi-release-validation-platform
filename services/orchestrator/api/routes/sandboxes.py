@@ -14,24 +14,37 @@ from db import get_db
 router = APIRouter()
 
 
+from datetime import datetime
+
 class SandboxResponse(BaseModel):
-    id:             str
-    run_id:         str
-    status:         str
-    anvil_port:     Optional[int] = None
-    node_port:      Optional[int] = None
-    graphql_port:   Optional[int] = None
-    docker_network: Optional[str] = None
-    container_ids:  Optional[List[str]] = None
-    failure_reason: Optional[str] = None
+    id:               str
+    run_id:           Optional[str] = None
+    status:           str
+    anvil_port:       Optional[int] = None
+    node_port:        Optional[int] = None
+    graphql_port:     Optional[int] = None
+    docker_network:   Optional[str] = None
+    container_ids:    Optional[List[str]] = None
+    failure_reason:   Optional[str] = None
+    provisioned_at:   Optional[datetime] = None
+    ready_at:         Optional[datetime] = None
+    closed_at:        Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+_SELECT = (
+    "SELECT id, run_id, status, anvil_port, node_port, graphql_port, "
+    "docker_network, container_ids, failure_reason, "
+    "provisioned_at, ready_at, closed_at "
+    "FROM sandbox.sandboxes"
+)
 
 
 @router.get("", response_model=List[SandboxResponse])
 async def list_sandboxes(db: AsyncSession = Depends(get_db)):
     rows = await db.execute(
-        text("SELECT id, run_id, status, anvil_port, node_port, graphql_port, "
-             "docker_network, container_ids, failure_reason "
-             "FROM sandbox.sandboxes ORDER BY provisioned_at DESC LIMIT 50")
+        text(f"{_SELECT} ORDER BY provisioned_at DESC LIMIT 50")
     )
     return [dict(r._mapping) for r in rows]
 
@@ -39,9 +52,7 @@ async def list_sandboxes(db: AsyncSession = Depends(get_db)):
 @router.get("/{sandbox_id}", response_model=SandboxResponse)
 async def get_sandbox(sandbox_id: str, db: AsyncSession = Depends(get_db)):
     rows = await db.execute(
-        text("SELECT id, run_id, status, anvil_port, node_port, graphql_port, "
-             "docker_network, container_ids, failure_reason "
-             "FROM sandbox.sandboxes WHERE id = :id"),
+        text(f"{_SELECT} WHERE id = :id"),
         {"id": sandbox_id},
     )
     row = rows.fetchone()

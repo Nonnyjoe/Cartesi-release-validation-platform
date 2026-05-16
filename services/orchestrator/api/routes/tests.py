@@ -1,53 +1,59 @@
 """
 GET  /tests          — list all test definitions
 GET  /tests/{id}     — get single definition
-POST /tests          — create a new definition from YAML content
-PATCH /tests/{id}    — toggle enabled / update content
+POST /tests          — create a new definition from YAML+MD content
+PATCH /tests/{id}    — toggle is_active
 """
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
-from pydantic import BaseModel
-from typing import Optional
+import json
+import re
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
-from ...database import get_db
+import yaml
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/tests", tags=["tests"])
+from db import get_db
+
+router = APIRouter(tags=["tests"])
+
+VALID_PRIORITIES = {"low", "medium", "high", "critical"}
 
 
 class TestDefinitionOut(BaseModel):
-    definition_id: str
+    id: str
+    slug: str
     name: str
-    description: str
-    category: str
-    priority: int
-    enabled: bool
+    version: int
+    priority: str
+    component: Optional[str] = None
+    is_active: bool
     tags: list[str]
     created_at: str
     updated_at: str
 
 
 class TestCreateIn(BaseModel):
-    name: str
     content: str  # raw YAML+MD body
 
 
 class TestPatchIn(BaseModel):
-    enabled: Optional[bool] = None
-    content: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 def _row_to_out(row) -> dict:
     return {
-        "definition_id": str(row.definition_id),
+        "id": str(row.id),
+        "slug": row.slug,
         "name": row.name,
-        "description": row.description or "",
-        "category": row.category or "general",
+        "version": row.version,
         "priority": row.priority,
-        "enabled": row.enabled,
-        "tags": row.tags or [],
+        "component": row.component,
+        "is_active": row.is_active,
+        "tags": list(row.tags) if row.tags else [],
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }
@@ -56,7 +62,7 @@ def _row_to_out(row) -> dict:
 @router.get("", response_model=list[TestDefinitionOut])
 async def list_definitions(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        text("SELECT * FROM tests.definitions ORDER BY priority DESC, name")
+        text("SELECT * FROM tests.definitions ORDER BY name")
     )
     return [_row_to_out(r) for r in result.fetchall()]
 
@@ -64,7 +70,7 @@ async def list_definitions(db: AsyncSession = Depends(get_db)):
 @router.get("/{definition_id}", response_model=TestDefinitionOut)
 async def get_definition(definition_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        text("SELECT * FROM tests.definitions WHERE definition_id = :id"),
+        text("SELECT * FROM tests.definitions WHERE id = :id"),
         {"id": definition_id},
     )
     row = result.fetchone()
@@ -75,8 +81,6 @@ async def get_definition(definition_id: str, db: AsyncSession = Depends(get_db))
 
 @router.post("", response_model=TestDefinitionOut, status_code=201)
 async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_db)):
-    import yaml, re
-
     # Parse YAML frontmatter
     match = re.match(r"^---\n(.*?)\n---\n(.*)$", body.content, re.DOTALL)
     if not match:
@@ -87,33 +91,50 @@ async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_d
     except Exception as e:
         raise HTTPException(422, f"Invalid YAML frontmatter: {e}")
 
+    slug = meta.get("id") or meta.get("slug")
+    if not slug:
+        raise HTTPException(422, "YAML frontmatter must include 'id' field (used as slug)")
+
+    priority = meta.get("priority", "medium")
+    if priority not in VALID_PRIORITIES:
+        priority = "medium"
+
     definition_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
+    tags = meta.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tags]
 
     await db.execute(
         text("""
             INSERT INTO tests.definitions
-                (definition_id, name, description, category, priority, enabled, tags,
-                 assertions, created_at, updated_at)
+                (id, slug, name, version, tags, component, priority,
+                 timeout_seconds, release_introduced, definition_raw, definition_parsed,
+                 is_active, created_at, updated_at)
             VALUES
-                (:id, :name, :desc, :cat, :pri, true, :tags::jsonb,
-                 :assertions::jsonb, :now, :now)
+                (:id, :slug, :name, :version, :tags, :component, CAST(:priority AS test_priority),
+                 :timeout_seconds, :release_introduced, :definition_raw, CAST(:definition_parsed AS jsonb),
+                 true, :now, :now)
         """),
         {
             "id": definition_id,
-            "name": meta.get("name", body.name),
-            "desc": meta.get("description", ""),
-            "cat": meta.get("category", "general"),
-            "pri": meta.get("priority", 5),
-            "tags": str(meta.get("tags", [])),
-            "assertions": str(meta.get("assertions", [])),
+            "slug": slug,
+            "name": meta.get("name", slug),
+            "version": int(meta.get("version", 1)),
+            "tags": tags,
+            "component": meta.get("component"),
+            "priority": priority,
+            "timeout_seconds": int(meta.get("timeout_seconds", 120)),
+            "release_introduced": meta.get("release_introduced"),
+            "definition_raw": body.content,
+            "definition_parsed": json.dumps(meta),
             "now": now,
         },
     )
     await db.commit()
 
     result = await db.execute(
-        text("SELECT * FROM tests.definitions WHERE definition_id = :id"),
+        text("SELECT * FROM tests.definitions WHERE id = :id"),
         {"id": definition_id},
     )
     return _row_to_out(result.fetchone())
@@ -123,19 +144,17 @@ async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_d
 async def patch_definition(
     definition_id: str, body: TestPatchIn, db: AsyncSession = Depends(get_db)
 ):
-    updates = {}
-    if body.enabled is not None:
-        updates["enabled"] = body.enabled
-    if not updates:
+    if body.is_active is None:
         raise HTTPException(422, "Nothing to update")
 
-    set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-    updates["id"] = definition_id
-    updates["now"] = datetime.now(timezone.utc)
-
     result = await db.execute(
-        text(f"UPDATE tests.definitions SET {set_clause}, updated_at = :now WHERE definition_id = :id RETURNING *"),
-        updates,
+        text("""
+            UPDATE tests.definitions
+            SET is_active = :is_active, updated_at = :now
+            WHERE id = :id
+            RETURNING *
+        """),
+        {"is_active": body.is_active, "now": datetime.now(timezone.utc), "id": definition_id},
     )
     row = result.fetchone()
     if not row:

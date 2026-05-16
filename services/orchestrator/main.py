@@ -11,15 +11,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.runs import router as runs_router
+from api.routes.releases import router as releases_router
 from api.routes.sandboxes import router as sandboxes_router
 from api.routes.reports import router as reports_router
 from api.routes.tests import router as tests_router
 from api.routes.sessions import router as sessions_router
 from api.routes.queues import router as queues_router
 from api.routes.health import router as health_router
-from api.websocket import router as ws_router
+from api.websocket import router as ws_router, redis_subscriber
 from consumers.sandbox_events import SandboxEventConsumer
 from consumers.test_results import TestResultConsumer
+from consumers.releases import ReleasesConsumer
 from db import engine, Base
 
 logging.basicConfig(level=logging.INFO)
@@ -35,17 +37,22 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    sandbox_consumer = SandboxEventConsumer()
-    result_consumer  = TestResultConsumer()
+    sandbox_consumer  = SandboxEventConsumer()
+    result_consumer   = TestResultConsumer()
+    releases_consumer = ReleasesConsumer()
 
-    consumer_tasks = await asyncio.gather(
+    await asyncio.gather(
         sandbox_consumer.start(),
         result_consumer.start(),
+        releases_consumer.start(),
         return_exceptions=True,
     )
 
-    sandbox_task = asyncio.create_task(sandbox_consumer.run())
-    result_task  = asyncio.create_task(result_consumer.run())
+    sandbox_task  = asyncio.create_task(sandbox_consumer.run())
+    result_task   = asyncio.create_task(result_consumer.run())
+    releases_task = asyncio.create_task(releases_consumer.run())
+    # Start WebSocket Redis relay here (not via deprecated @on_event("startup"))
+    ws_redis_task = asyncio.create_task(redis_subscriber())
 
     log.info("Orchestrator ready.")
     yield
@@ -53,9 +60,13 @@ async def lifespan(app: FastAPI):
     log.info("Orchestrator shutting down...")
     sandbox_task.cancel()
     result_task.cancel()
-    await asyncio.gather(sandbox_task, result_task, return_exceptions=True)
+    releases_task.cancel()
+    ws_redis_task.cancel()
+    await asyncio.gather(sandbox_task, result_task, releases_task, ws_redis_task,
+                         return_exceptions=True)
     await sandbox_consumer.stop()
     await result_consumer.stop()
+    await releases_consumer.stop()
 
 
 app = FastAPI(
@@ -73,6 +84,7 @@ app.add_middleware(
 )
 
 app.include_router(runs_router,       prefix="/runs",       tags=["runs"])
+app.include_router(releases_router,   prefix="/releases",   tags=["releases"])
 app.include_router(sandboxes_router,  prefix="/sandboxes",  tags=["sandboxes"])
 app.include_router(reports_router,    prefix="/reports",    tags=["reports"])
 app.include_router(ws_router,         prefix="/ws",         tags=["websocket"])

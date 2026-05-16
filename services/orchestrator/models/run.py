@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, String, Integer, SmallInteger, Numeric, ARRAY,
-    TIMESTAMP, Boolean, Enum as SAEnum, text,
+    TIMESTAMP, Boolean, Enum as SAEnum, ForeignKey, text,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -27,9 +27,9 @@ class Run(Base):
     release_tag       = Column(String, nullable=False)
     image_tag         = Column(String, nullable=False)
     suite_ids         = Column(ARRAY(UUID(as_uuid=True)))
-    status            = Column(String, nullable=False, default="queued")
+    status            = Column(SAEnum("queued", "provisioning", "running", "completed", "failed", "warning", "cancelled", name="run_status", create_type=False), nullable=False, default="queued")
     priority          = Column(SmallInteger, nullable=False, default=5)
-    triggered_by      = Column(String, nullable=False)
+    triggered_by      = Column(SAEnum("github_release", "user", "scheduled", name="triggered_by_type", create_type=False), nullable=False)
     triggered_by_user = Column(String)
     queued_at         = Column(TIMESTAMP(timezone=True), default=_now)
     started_at        = Column(TIMESTAMP(timezone=True))
@@ -46,7 +46,7 @@ class RunEvent(Base):
     __table_args__ = {"schema": "orchestrator"}
 
     id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id     = Column(UUID(as_uuid=True), nullable=False)
+    run_id     = Column(UUID(as_uuid=True), ForeignKey("orchestrator.runs.id"), nullable=False)
     event_type = Column(String, nullable=False)
     payload    = Column(JSONB)
     ts         = Column(TIMESTAMP(timezone=True), default=_now)
