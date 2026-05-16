@@ -291,6 +291,18 @@ CREATE TABLE ai.suggested_test_actions (
 -- ─────────────────────────────────────────────────────────────
 --  8. GITHUB SCHEMA
 -- ─────────────────────────────────────────────────────────────
+--
+-- BCNF normalized version chain.  Every non-key attribute depends on its
+-- own table's PK only.  FK direction follows the real causal dependency:
+--
+--   release_catalog.cli_tag  → cli_catalog.tag
+--   cli_catalog.sdk_tag      → sdk_catalog.tag
+--   cli_catalog.devnet_tag   → devnet_catalog.tag
+--   devnet_catalog.contracts_tag → contracts_catalog.tag
+--
+-- All cross-reference lookups (e.g. "which node release uses this SDK?")
+-- are derived at query time via reverse JOINs — never stored redundantly.
+-- ─────────────────────────────────────────────────────────────
 
 CREATE TABLE github.releases (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -309,99 +321,134 @@ CREATE TABLE github.releases (
 CREATE INDEX idx_releases_tag_name ON github.releases (tag_name);
 CREATE INDEX idx_releases_detected_at ON github.releases (detected_at DESC);
 
--- Curated catalog of known/tested rollups-node releases
+-- ── contracts_catalog — leaf of the version chain ────────────────────────────
+-- No FK columns: contracts releases are standalone facts.
+CREATE TABLE IF NOT EXISTS github.contracts_catalog (
+  tag          TEXT PRIMARY KEY,
+  channel      TEXT NOT NULL DEFAULT 'alpha',
+  label        TEXT,
+  is_active    BOOLEAN NOT NULL DEFAULT true,
+  added_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at TIMESTAMPTZ,
+  downloads    INTEGER DEFAULT 0,
+  body         TEXT,
+  html_url     TEXT
+);
+
+-- ── devnet_catalog — bundles a contracts deployment ───────────────────────────
+-- @cartesi/devnet is an npm package shipped with each @cartesi/cli release.
+-- contracts_tag: which rollups-contracts deployment this devnet includes.
+CREATE TABLE IF NOT EXISTS github.devnet_catalog (
+  tag           TEXT PRIMARY KEY,
+  contracts_tag TEXT REFERENCES github.contracts_catalog (tag),
+  channel       TEXT NOT NULL DEFAULT 'alpha',
+  label         TEXT,
+  is_active     BOOLEAN NOT NULL DEFAULT true,
+  added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at  TIMESTAMPTZ,
+  downloads     INTEGER DEFAULT 0,
+  body          TEXT,
+  html_url      TEXT
+);
+
+-- ── sdk_catalog — Docker runtime image releases ───────────────────────────────
+-- No FK columns: which CLI/node uses this SDK is derived via reverse JOIN.
+CREATE TABLE IF NOT EXISTS github.sdk_catalog (
+  tag          TEXT PRIMARY KEY,
+  channel      TEXT NOT NULL DEFAULT 'alpha',
+  label        TEXT,
+  is_active    BOOLEAN NOT NULL DEFAULT true,
+  added_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at TIMESTAMPTZ,
+  downloads    INTEGER DEFAULT 0,
+  body         TEXT,
+  html_url     TEXT
+);
+
+-- ── cli_catalog — @cartesi/cli releases (v2.x) ───────────────────────────────
+-- sdk_tag:    which @cartesi/sdk this CLI version uses
+-- devnet_tag: which @cartesi/devnet this CLI ships (→ contracts via devnet_catalog)
+CREATE TABLE IF NOT EXISTS github.cli_catalog (
+  tag        TEXT PRIMARY KEY,
+  sdk_tag    TEXT REFERENCES github.sdk_catalog (tag),
+  devnet_tag TEXT REFERENCES github.devnet_catalog (tag),
+  channel    TEXT NOT NULL DEFAULT 'alpha',
+  label      TEXT,
+  is_active  BOOLEAN NOT NULL DEFAULT true,
+  added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at TIMESTAMPTZ,
+  downloads  INTEGER DEFAULT 0,
+  body       TEXT,
+  html_url   TEXT
+);
+
+-- ── release_catalog — curated rollups-node releases ──────────────────────────
+-- cli_tag: which @cartesi/cli ships with this node release.
+--          NULL for v1.x (no CLI concept).
+-- image_tag is NOT stored — computed at query time:
+--   v2.x → 'cartesi/rollups-runtime:' || ltrim(cli.sdk_tag, 'v')
+--   v1.x → 'cartesi/rollups-node:'    || ltrim(tag, 'v')
 CREATE TABLE IF NOT EXISTS github.release_catalog (
   tag                TEXT PRIMARY KEY,
-  image_tag          TEXT NOT NULL,        -- primary Docker image for this release
-  sdk_version        TEXT,                 -- v2.x: @cartesi/sdk version (= Docker image tag suffix)
-  cli_version        TEXT,                 -- v2.x: @cartesi/cli version that ships with this node release
-  node_major_version SMALLINT,             -- 1 or 2
-  channel            TEXT NOT NULL DEFAULT 'stable',  -- stable | alpha | beta
+  cli_tag            TEXT REFERENCES github.cli_catalog (tag),
+  node_major_version SMALLINT,
+  channel            TEXT NOT NULL DEFAULT 'stable',
   label              TEXT,
   is_active          BOOLEAN NOT NULL DEFAULT true,
   added_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   published_at       TIMESTAMPTZ,
   downloads          INTEGER DEFAULT 0,
   body               TEXT,
-  html_url           TEXT,
-  devnet_version     TEXT,                 -- @cartesi/devnet version
-  contracts_version  TEXT                  -- rollups-contracts version
+  html_url           TEXT
 );
 
--- Seed with known releases.
--- v1.x: Docker Hub (docker.io/cartesi/rollups-node:<ver>), no 'v' prefix in image tag.
--- v2.x: SDK runtime image (cartesi/rollups-runtime:<sdk_version>).
---       cli_version is the @cartesi/cli version that ships with the node release.
-INSERT INTO github.release_catalog (tag, image_tag, sdk_version, cli_version, node_major_version, channel, label) VALUES
-  ('v1.5.1',          'cartesi/rollups-node:1.5.1',              NULL,                NULL,               1, 'stable', 'v1.5.1 (stable)'),
-  ('v2.0.0-alpha.11', 'cartesi/rollups-runtime:0.12.0-alpha.39', '0.12.0-alpha.39',  '2.0.0-alpha.34',  2, 'alpha',  'v2.0.0-alpha.11'),
-  ('v2.0.0-alpha.10', 'cartesi/rollups-runtime:0.12.0-alpha.27', '0.12.0-alpha.27',  NULL,              2, 'alpha',  'v2.0.0-alpha.10'),
-  ('v2.0.0-alpha.9',  'cartesi/rollups-runtime:0.12.0-alpha.27', '0.12.0-alpha.27',  '2.0.0-alpha.22',  2, 'alpha',  'v2.0.0-alpha.9'),
-  ('v2.0.0-alpha.8',  'cartesi/rollups-runtime:0.12.0-alpha.23', '0.12.0-alpha.23',  '2.0.0-alpha.19',  2, 'alpha',  'v2.0.0-alpha.8'),
-  ('v2.0.0-alpha.7',  'cartesi/rollups-runtime:0.12.0-alpha.22', '0.12.0-alpha.22',  '2.0.0-alpha.13',  2, 'alpha',  'v2.0.0-alpha.7')
+-- ── Seed data ─────────────────────────────────────────────────────────────────
+-- Insert leaf-to-root so FK constraints are satisfied immediately.
+-- contracts_catalog and sdk_catalog first, then devnet_catalog, cli_catalog, release_catalog.
+
+INSERT INTO github.contracts_catalog (tag, channel, label) VALUES
+  ('v2.2.0', 'stable', 'rollups-contracts v2.2.0'),
+  ('v2.1.1', 'stable', 'rollups-contracts v2.1.1'),
+  ('v2.0.1', 'stable', 'rollups-contracts v2.0.1')
 ON CONFLICT (tag) DO NOTHING;
 
--- CLI release catalog (releases from cartesi/cli repo, major v2.x)
-CREATE TABLE IF NOT EXISTS github.cli_catalog (
-  tag              TEXT PRIMARY KEY,
-  channel          TEXT NOT NULL DEFAULT 'alpha',
-  label            TEXT,
-  is_active        BOOLEAN NOT NULL DEFAULT true,
-  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  published_at     TIMESTAMPTZ,
-  downloads        INTEGER DEFAULT 0,
-  body             TEXT,
-  html_url         TEXT,
-  node_release_tag TEXT,  -- rollups-node release this CLI targets
-  sdk_tag          TEXT,  -- SDK release this CLI pairs with
-  devnet_tag       TEXT,  -- @cartesi/devnet version this CLI ships
-  contracts_tag    TEXT   -- contracts version (via devnet)
-);
-
--- SDK release catalog (releases from cartesi/cli repo, major v0.x)
-CREATE TABLE IF NOT EXISTS github.sdk_catalog (
-  tag              TEXT PRIMARY KEY,
-  channel          TEXT NOT NULL DEFAULT 'alpha',
-  label            TEXT,
-  is_active        BOOLEAN NOT NULL DEFAULT true,
-  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  published_at     TIMESTAMPTZ,
-  downloads        INTEGER DEFAULT 0,
-  body             TEXT,
-  html_url         TEXT,
-  node_release_tag TEXT,  -- rollups-node release this SDK targets
-  cli_tag          TEXT   -- CLI release this SDK pairs with
-);
-
--- Rollups-contracts release catalog
-CREATE TABLE IF NOT EXISTS github.contracts_catalog (
-  tag              TEXT PRIMARY KEY,
-  channel          TEXT NOT NULL DEFAULT 'alpha',
-  label            TEXT,
-  is_active        BOOLEAN NOT NULL DEFAULT true,
-  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  published_at     TIMESTAMPTZ,
-  downloads        INTEGER DEFAULT 0,
-  body             TEXT,
-  html_url         TEXT,
-  devnet_tag       TEXT,
-  cli_tag          TEXT,
-  node_release_tag TEXT,
-  sdk_tag          TEXT
-);
-
-INSERT INTO github.cli_catalog (tag, channel, label, node_release_tag, sdk_tag, devnet_tag, contracts_tag) VALUES
-  ('v2.0.0-alpha.34', 'alpha', 'v2.0.0-alpha.34', 'v2.0.0-alpha.11', 'v0.12.0-alpha.39', NULL, NULL),
-  ('v2.0.0-alpha.22', 'alpha', 'v2.0.0-alpha.22', 'v2.0.0-alpha.9',  'v0.12.0-alpha.27', NULL, NULL),
-  ('v2.0.0-alpha.19', 'alpha', 'v2.0.0-alpha.19', 'v2.0.0-alpha.8',  'v0.12.0-alpha.23', NULL, NULL),
-  ('v2.0.0-alpha.13', 'alpha', 'v2.0.0-alpha.13', 'v2.0.0-alpha.7',  'v0.12.0-alpha.22', NULL, NULL)
+INSERT INTO github.sdk_catalog (tag, channel, label) VALUES
+  ('v0.12.0-alpha.39', 'alpha', 'v0.12.0-alpha.39'),
+  ('v0.12.0-alpha.27', 'alpha', 'v0.12.0-alpha.27'),
+  ('v0.12.0-alpha.23', 'alpha', 'v0.12.0-alpha.23'),
+  ('v0.12.0-alpha.22', 'alpha', 'v0.12.0-alpha.22')
 ON CONFLICT (tag) DO NOTHING;
 
-INSERT INTO github.sdk_catalog (tag, channel, label, node_release_tag, cli_tag) VALUES
-  ('v0.12.0-alpha.39', 'alpha', 'v0.12.0-alpha.39', 'v2.0.0-alpha.11', 'v2.0.0-alpha.34'),
-  ('v0.12.0-alpha.27', 'alpha', 'v0.12.0-alpha.27', 'v2.0.0-alpha.9',  'v2.0.0-alpha.22'),
-  ('v0.12.0-alpha.23', 'alpha', 'v0.12.0-alpha.23', 'v2.0.0-alpha.8',  'v2.0.0-alpha.19'),
-  ('v0.12.0-alpha.22', 'alpha', 'v0.12.0-alpha.22', 'v2.0.0-alpha.7',  'v2.0.0-alpha.13')
+-- devnet_catalog: seeded with known devnet↔contracts pairings.
+-- devnet_tag values are populated by github-watcher from CLI release bodies.
+-- Until synced from GitHub the devnet entries below serve as anchors; the
+-- contracts_tag links are the authoritative source for sandbox provisioning.
+INSERT INTO github.devnet_catalog (tag, contracts_tag, channel, label) VALUES
+  ('2.2.0', 'v2.2.0', 'stable', '@cartesi/devnet 2.2.0'),
+  ('2.1.1', 'v2.1.1', 'stable', '@cartesi/devnet 2.1.1'),
+  ('2.0.1', 'v2.0.1', 'stable', '@cartesi/devnet 2.0.1')
+ON CONFLICT (tag) DO NOTHING;
+
+-- cli_catalog: sdk_tag and devnet_tag are FKs established by seeding above.
+INSERT INTO github.cli_catalog (tag, sdk_tag, devnet_tag, channel, label) VALUES
+  ('v2.0.0-alpha.34', 'v0.12.0-alpha.39', '2.2.0', 'alpha', 'v2.0.0-alpha.34'),
+  ('v2.0.0-alpha.22', 'v0.12.0-alpha.27', '2.1.1', 'alpha', 'v2.0.0-alpha.22'),
+  ('v2.0.0-alpha.19', 'v0.12.0-alpha.23', '2.0.1', 'alpha', 'v2.0.0-alpha.19'),
+  ('v2.0.0-alpha.13', 'v0.12.0-alpha.22', '2.0.1', 'alpha', 'v2.0.0-alpha.13')
+ON CONFLICT (tag) DO NOTHING;
+
+-- release_catalog: cli_tag FK points to cli_catalog.
+-- v1.x releases have cli_tag = NULL (no CLI concept).
+-- image_tag is NOT stored here; computed in queries via the JOIN chain.
+INSERT INTO github.release_catalog
+  (tag, cli_tag, node_major_version, channel, label)
+VALUES
+  ('v1.5.1',          NULL,               1, 'stable', 'v1.5.1 (stable)'),
+  ('v2.0.0-alpha.11', 'v2.0.0-alpha.34',  2, 'alpha',  'v2.0.0-alpha.11'),
+  ('v2.0.0-alpha.10', NULL,               2, 'alpha',  'v2.0.0-alpha.10'),
+  ('v2.0.0-alpha.9',  'v2.0.0-alpha.22',  2, 'alpha',  'v2.0.0-alpha.9'),
+  ('v2.0.0-alpha.8',  'v2.0.0-alpha.19',  2, 'alpha',  'v2.0.0-alpha.8'),
+  ('v2.0.0-alpha.7',  'v2.0.0-alpha.13',  2, 'alpha',  'v2.0.0-alpha.7')
 ON CONFLICT (tag) DO NOTHING;
 
 

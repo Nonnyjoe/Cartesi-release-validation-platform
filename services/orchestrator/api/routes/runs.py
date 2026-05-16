@@ -45,21 +45,13 @@ class RunResponse(BaseModel):
     priority:          int
     triggered_by:      str
     triggered_by_user: Optional[str] = None
-    suite_ids:         Optional[List[str]] = None
+    suite_ids:         Optional[List[UUID]] = None
     queued_at:         datetime
     started_at:        Optional[datetime] = None
     completed_at:      Optional[datetime] = None
     pass_rate:         Optional[float] = None
 
     model_config = {"from_attributes": True}
-
-    @classmethod
-    def from_orm_run(cls, run):
-        data = {c: getattr(run, c) for c in cls.model_fields if hasattr(run, c)}
-        # Convert UUID list to string list for JSON serialisation
-        if run.suite_ids:
-            data["suite_ids"] = [str(s) for s in run.suite_ids]
-        return cls(**data)
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -92,11 +84,24 @@ async def trigger_run(
     await db.commit()
     await db.refresh(run)
 
-    # Look up sdk_version, cli_version, devnet_version, contracts_version from release catalog
+    # Look up version chain via JOIN — no denormalized columns on release_catalog
     catalog_row = await db.execute(
         text("""
-            SELECT sdk_version, cli_version, devnet_version, contracts_version, node_major_version
-            FROM github.release_catalog WHERE tag = :tag
+            SELECT
+                rc.node_major_version,
+                CASE
+                    WHEN rc.node_major_version >= 2 AND c.sdk_tag IS NOT NULL
+                        THEN 'cartesi/rollups-runtime:' || LTRIM(c.sdk_tag, 'v')
+                    ELSE 'cartesi/rollups-node:' || LTRIM(rc.tag, 'v')
+                END                    AS image_tag,
+                LTRIM(c.sdk_tag, 'v') AS sdk_version,
+                LTRIM(c.tag, 'v')     AS cli_version,
+                c.devnet_tag          AS devnet_version,
+                d.contracts_tag       AS contracts_version
+            FROM github.release_catalog rc
+            LEFT JOIN github.cli_catalog    c ON c.tag = rc.cli_tag
+            LEFT JOIN github.devnet_catalog d ON d.tag = c.devnet_tag
+            WHERE rc.tag = :tag
         """),
         {"tag": body.release_tag},
     )
@@ -145,6 +150,38 @@ async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     if not run:
         raise HTTPException(404, detail=f"Run {run_id} not found")
     return run
+
+
+@router.get("/{run_id}/events")
+async def get_run_events(run_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Return all stored events for a run in chronological order.
+    Used by the dashboard to hydrate the setup/activity log on page load.
+    """
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid run_id")
+    result = await db.execute(
+        text("""
+            SELECT id, run_id, event_type, payload, ts
+            FROM orchestrator.run_events
+            WHERE run_id = :rid
+            ORDER BY ts ASC
+        """),
+        {"rid": rid},
+    )
+    rows = result.fetchall()
+    return [
+        {
+            "id":         str(row.id),
+            "run_id":     str(row.run_id),
+            "event_type": row.event_type,
+            "payload":    row.payload or {},
+            "ts":         row.ts.isoformat() if row.ts else None,
+        }
+        for row in rows
+    ]
 
 
 @router.post("/{run_id}/cancel")

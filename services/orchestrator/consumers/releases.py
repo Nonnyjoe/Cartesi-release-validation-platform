@@ -71,13 +71,24 @@ class ReleasesConsumer:
                 log.info("Run for release %s already exists — skipping", tag_name)
                 return
 
-            # ── Look up the release catalog for the resolved image / SDK / CLI info ─
+            # ── Look up the release catalog — JOIN through the version chain ──────
             catalog_row = await db.execute(
                 text("""
-                    SELECT image_tag, sdk_version, cli_version, devnet_version,
-                           contracts_version, node_major_version
-                    FROM github.release_catalog
-                    WHERE tag = :tag
+                    SELECT
+                        rc.node_major_version,
+                        CASE
+                            WHEN rc.node_major_version >= 2 AND c.sdk_tag IS NOT NULL
+                                THEN 'cartesi/rollups-runtime:' || LTRIM(c.sdk_tag, 'v')
+                            ELSE 'cartesi/rollups-node:' || LTRIM(rc.tag, 'v')
+                        END                        AS image_tag,
+                        LTRIM(c.sdk_tag, 'v')      AS sdk_version,
+                        LTRIM(c.tag, 'v')          AS cli_version,
+                        c.devnet_tag               AS devnet_version,
+                        d.contracts_tag            AS contracts_version
+                    FROM github.release_catalog rc
+                    LEFT JOIN github.cli_catalog    c ON c.tag = rc.cli_tag
+                    LEFT JOIN github.devnet_catalog d ON d.tag = c.devnet_tag
+                    WHERE rc.tag = :tag
                 """),
                 {"tag": tag_name},
             )

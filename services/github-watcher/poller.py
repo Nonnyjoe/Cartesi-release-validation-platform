@@ -178,8 +178,9 @@ async def _insert_release(release: dict, prs: list[dict]):
 
 async def _upsert_catalog(release: dict):
     """
-    Keep github.release_catalog up-to-date when a new release is detected.
-    For v2.x releases the SDK version is resolved from the cartesi/cli releases.
+    Keep the normalized version chain up-to-date when a new rollups-node release
+    is detected.  Writes leaf-to-root so FK constraints are satisfied:
+      contracts_catalog → devnet_catalog → sdk_catalog → cli_catalog → release_catalog
     """
     tag      = release["tag_name"]
     major    = _major(tag)
@@ -192,58 +193,93 @@ async def _upsert_catalog(release: dict):
     body     = (release.get("body") or "")[:5000]
     html_url = release.get("html_url", "")
 
-    # Resolve SDK, CLI, devnet, and contracts versions for v2.x in a single GitHub API call
-    sdk_version      = None
-    cli_version      = None
-    devnet_version   = None
-    contracts_version = None
-    if major >= 2:
-        sdk_version, cli_version, devnet_version, contracts_version = await resolve_all_versions(tag, GITHUB_TOKEN)
+    cli_tag       = None
+    sdk_tag       = None
+    devnet_tag    = None
+    contracts_tag = None
 
-    image_tag = derive_image_tag(tag, sdk_version)
+    if major >= 2:
+        sdk_version, cli_version, devnet_version, contracts_version = \
+            await resolve_all_versions(tag, GITHUB_TOKEN)
+        cli_tag       = f"v{cli_version}"    if cli_version    else None
+        sdk_tag       = f"v{sdk_version}"    if sdk_version    else None
+        devnet_tag    = devnet_version        if devnet_version else None
+        contracts_tag = f"v{contracts_version}" if contracts_version else None
+
+    now = datetime.now(timezone.utc)
 
     async with AsyncSession(engine) as session:
+        # Leaf nodes first
+        if sdk_tag:
+            await session.execute(text("""
+                INSERT INTO github.sdk_catalog (tag, channel, label, added_at)
+                VALUES (:tag, :chan, :tag, :now) ON CONFLICT (tag) DO NOTHING
+            """), {"tag": sdk_tag, "chan": channel, "now": now})
+
+        if contracts_tag:
+            await session.execute(text("""
+                INSERT INTO github.contracts_catalog (tag, channel, label, added_at)
+                VALUES (:tag, :chan, :tag, :now) ON CONFLICT (tag) DO NOTHING
+            """), {"tag": contracts_tag, "chan": channel, "now": now})
+
+        if devnet_tag:
+            await session.execute(text("""
+                INSERT INTO github.devnet_catalog
+                    (tag, contracts_tag, channel, label, added_at)
+                VALUES (:tag, :contracts_tag, :chan, :tag, :now)
+                ON CONFLICT (tag) DO UPDATE SET
+                    contracts_tag = COALESCE(EXCLUDED.contracts_tag,
+                                             github.devnet_catalog.contracts_tag)
+            """), {"tag": devnet_tag, "contracts_tag": contracts_tag,
+                   "chan": channel, "now": now})
+
+        if cli_tag:
+            await session.execute(text("""
+                INSERT INTO github.cli_catalog
+                    (tag, sdk_tag, devnet_tag, channel, label, is_active, added_at)
+                VALUES (:tag, :sdk_tag, :devnet_tag, :chan, :tag, true, :now)
+                ON CONFLICT (tag) DO UPDATE SET
+                    sdk_tag    = COALESCE(EXCLUDED.sdk_tag,    github.cli_catalog.sdk_tag),
+                    devnet_tag = COALESCE(EXCLUDED.devnet_tag, github.cli_catalog.devnet_tag)
+            """), {"tag": cli_tag, "sdk_tag": sdk_tag, "devnet_tag": devnet_tag,
+                   "chan": channel, "now": now})
+
+        # release_catalog stores only cli_tag FK + metadata
         await session.execute(text("""
             INSERT INTO github.release_catalog
-                (tag, image_tag, sdk_version, cli_version, node_major_version,
-                 channel, label, is_active, added_at,
-                 published_at, downloads, body, html_url,
-                 devnet_version, contracts_version)
+                (tag, cli_tag, node_major_version, channel, label, is_active,
+                 added_at, published_at, downloads, body, html_url)
             VALUES
-                (:tag, :image_tag, :sdk_version, :cli_version, :major,
-                 :channel, :label, true, now(),
-                 :published_at, :downloads, :body, :html_url,
-                 :devnet, :contracts)
+                (:tag, :cli_tag, :major, :channel, :label, true,
+                 :now, :published_at, :downloads, :body, :html_url)
             ON CONFLICT (tag) DO UPDATE SET
-                image_tag          = EXCLUDED.image_tag,
-                sdk_version        = EXCLUDED.sdk_version,
-                cli_version        = EXCLUDED.cli_version,
+                cli_tag            = COALESCE(EXCLUDED.cli_tag,
+                                              github.release_catalog.cli_tag),
                 node_major_version = EXCLUDED.node_major_version,
                 channel            = EXCLUDED.channel,
                 published_at       = EXCLUDED.published_at,
                 downloads          = EXCLUDED.downloads,
                 body               = EXCLUDED.body,
-                html_url           = EXCLUDED.html_url,
-                devnet_version     = EXCLUDED.devnet_version,
-                contracts_version  = EXCLUDED.contracts_version
+                html_url           = EXCLUDED.html_url
         """), {
-            "tag":               tag,
-            "image_tag":         image_tag,
-            "sdk_version":       sdk_version,
-            "cli_version":       cli_version,
-            "major":             major,
-            "channel":           channel,
-            "label":             tag,
-            "published_at":      published_at,
-            "downloads":         downloads,
-            "body":              body,
-            "html_url":          html_url,
-            "devnet":            devnet_version,
-            "contracts":         contracts_version,
+            "tag":          tag,
+            "cli_tag":      cli_tag,
+            "major":        major,
+            "channel":      channel,
+            "label":        tag,
+            "now":          now,
+            "published_at": published_at,
+            "downloads":    downloads,
+            "body":         body,
+            "html_url":     html_url,
         })
         await session.commit()
-    log.info("Upserted %s into release_catalog (node_major=%d sdk=%s cli=%s devnet=%s contracts=%s)",
-             tag, major, sdk_version, cli_version, devnet_version, contracts_version)
+
+    log.info(
+        "Upserted %s into release chain "
+        "(node_major=%d cli=%s sdk=%s devnet=%s contracts=%s)",
+        tag, major, cli_tag, sdk_tag, devnet_tag, contracts_tag,
+    )
 
 
 async def _upsert_contracts_catalog(release: dict):
