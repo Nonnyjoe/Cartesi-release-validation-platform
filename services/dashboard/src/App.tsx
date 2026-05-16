@@ -5,6 +5,8 @@ import { useWebSocket } from './hooks/useWebSocket'
 import { useState } from 'react'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
+import Releases from './pages/Releases'
+import Tests from './pages/Tests'
 import Sandboxes from './pages/Sandboxes'
 import Sessions from './pages/Sessions'
 import Session from './pages/Session'
@@ -12,6 +14,8 @@ import AISuggestions from './pages/AISuggestions'
 
 const NAV = [
   { to: '/runs',        label: '⚡ Runs' },
+  { to: '/releases',    label: '🏷 Releases' },
+  { to: '/tests',       label: '🧪 Tests' },
   { to: '/sandboxes',   label: '📦 Sandboxes' },
   { to: '/sessions',    label: '🤖 AI Sessions' },
   { to: '/suggestions', label: '💡 Suggestions' },
@@ -87,6 +91,8 @@ export default function App() {
               <Route path="/" element={<Navigate to="/runs" replace />} />
               <Route path="/runs" element={<Runs />} />
               <Route path="/runs/:runId" element={<RunDetail />} />
+              <Route path="/releases" element={<Releases />} />
+              <Route path="/tests" element={<Tests />} />
               <Route path="/sandboxes" element={<Sandboxes />} />
               <Route path="/sessions" element={<Sessions />} />
               <Route path="/sessions/:sessionId" element={<Session />} />

@@ -35,7 +35,8 @@ export function useWebSocket({ channel, onEvent, enabled = true }: Options = {})
 
     sock.onmessage = (ev) => {
       try {
-        const data = JSON.parse(ev.data) as WSEvent
+        const raw = JSON.parse(ev.data)
+        const data: WSEvent = { payload: {}, ...raw }
         onEventRef.current?.(data)
       } catch {
         // non-JSON heartbeat — ignore

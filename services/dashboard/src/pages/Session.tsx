@@ -15,12 +15,11 @@ export default function Session() {
   const [sending, setSending] = useState(false)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
-  const loadSession = () =>
-    sessionId && sessionsApi.get(sessionId).then(setSession).catch(console.error)
+  const loadSession = () => { if (sessionId) sessionsApi.get(sessionId).then(setSession).catch(console.error) }
 
   useEffect(() => { loadSession() }, [sessionId])
 
-  const { connected, send: wsSend } = useWebSocket({
+  const { connected } = useWebSocket({
     channel: sessionId,
     onEvent: (ev) => {
       if (ev.event_type === 'ai.token') {
@@ -152,7 +151,7 @@ export default function Session() {
             </button>
             <button
               className="btn-ghost text-rvp-error border-rvp-error/30 text-xs"
-              onClick={() => sessionsApi.cancel(session.session_id).then(loadSession)}
+              onClick={() => sessionsApi.cancel(session.session_id).then(() => loadSession())}
             >
               Stop
             </button>

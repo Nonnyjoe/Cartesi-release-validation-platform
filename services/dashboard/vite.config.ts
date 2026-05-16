@@ -7,12 +7,12 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://orchestrator:8000',
+        target: 'http://localhost:8000',
         rewrite: (path) => path.replace(/^\/api/, ''),
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://orchestrator:8000',
+        target: 'ws://localhost:8000',
         ws: true,
         changeOrigin: true,
       },

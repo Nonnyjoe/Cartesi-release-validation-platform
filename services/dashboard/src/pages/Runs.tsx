@@ -1,29 +1,42 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { runsApi } from '../api'
+import { runsApi, releasesApi } from '../api'
 import { StatusBadge } from '../components/StatusBadge'
-import type { Run, RunStatus } from '../types'
+import type { Run, RunStatus, ReleaseEntry } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { format } from 'date-fns'
 
-const STATUSES: RunStatus[] = ['pending', 'provisioning', 'running', 'completed', 'failed', 'cancelled']
+const STATUSES: RunStatus[] = ['queued', 'provisioning', 'running', 'completed', 'failed', 'cancelled']
+const PAGE_SIZE = 20
+
 
 function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (r: Run) => void }) {
-  const [form, setForm] = useState({ node_version: '', pr_number: '', repo_url: '', priority: '5' })
+  const [catalog, setCatalog] = useState<ReleaseEntry[]>([])
+  const [selectedTag, setSelectedTag] = useState('')
+  const [triggeredByUser, setTriggeredByUser] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  useEffect(() => {
+    releasesApi.list().then(entries => {
+      setCatalog(entries)
+      if (entries.length > 0) setSelectedTag(entries[0].tag)
+    }).catch(console.error)
+  }, [])
+
+  const selected = catalog.find(e => e.tag === selectedTag) ?? null
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!form.node_version.trim()) { setError('Node version is required'); return }
+    if (!selected) { setError('Select a release'); return }
     setLoading(true)
     try {
       const run = await runsApi.create({
-        node_version: form.node_version.trim(),
-        pr_number: form.pr_number ? parseInt(form.pr_number) : undefined,
-        repo_url: form.repo_url || undefined,
-        triggered_by: 'dashboard',
-        priority: parseInt(form.priority),
+        release_tag:       selected.tag,
+        image_tag:         selected.image_tag,
+        priority:          5,
+        triggered_by:      'user',
+        triggered_by_user: triggeredByUser.trim() || undefined,
       })
       onCreated(run)
       onClose()
@@ -34,31 +47,44 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
       <div className="card w-full max-w-md p-6 space-y-4">
         <h2 className="text-lg font-semibold text-gray-100">Trigger New Run</h2>
-        <form onSubmit={submit} className="space-y-3">
+        <form onSubmit={submit} className="space-y-4">
+
+          {/* Release dropdown */}
           <div>
-            <label className="text-xs text-gray-400 block mb-1">Node Version *</label>
-            <input className="input w-full" placeholder="1.5.0" value={form.node_version}
-              onChange={e => setForm(f => ({ ...f, node_version: e.target.value }))} />
+            <label className="text-xs text-gray-400 block mb-1">Select Release *</label>
+            {catalog.length === 0 ? (
+              <div className="text-xs text-gray-500">Loading releases…</div>
+            ) : (
+              <select
+                className="input w-full"
+                value={selectedTag}
+                onChange={e => setSelectedTag(e.target.value)}
+              >
+                {catalog.map(entry => (
+                  <option key={entry.tag} value={entry.tag}>
+                    {entry.tag} ({entry.channel})
+                  </option>
+                ))}
+              </select>
+            )}
+            {selected && (
+              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
+                {selected.image_tag}
+              </div>
+            )}
           </div>
+
           <div>
-            <label className="text-xs text-gray-400 block mb-1">PR Number</label>
-            <input className="input w-full" type="number" placeholder="123" value={form.pr_number}
-              onChange={e => setForm(f => ({ ...f, pr_number: e.target.value }))} />
+            <label className="text-xs text-gray-400 block mb-1">Your Name</label>
+            <input className="input w-full" placeholder="optional" value={triggeredByUser}
+              onChange={e => setTriggeredByUser(e.target.value)} />
           </div>
-          <div>
-            <label className="text-xs text-gray-400 block mb-1">Repo URL</label>
-            <input className="input w-full" placeholder="https://github.com/..." value={form.repo_url}
-              onChange={e => setForm(f => ({ ...f, repo_url: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-xs text-gray-400 block mb-1">Priority (1–10)</label>
-            <input className="input w-full" type="number" min="1" max="10" value={form.priority}
-              onChange={e => setForm(f => ({ ...f, priority: e.target.value }))} />
-          </div>
+
           {error && <div className="text-xs text-rvp-error">{error}</div>}
+
           <div className="flex gap-2 pt-1">
-            <button type="submit" className="btn-primary flex-1" disabled={loading}>
-              {loading ? 'Creating…' : 'Create Run'}
+            <button type="submit" className="btn-primary flex-1" disabled={loading || !selected}>
+              {loading ? 'Creating…' : 'Run Tests'}
             </button>
             <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           </div>
@@ -70,25 +96,31 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
 export default function Runs() {
   const [runs, setRuns] = useState<Run[]>([])
-  const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
+  const [offset, setOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [showModal, setShowModal] = useState(false)
-  const PAGE_SIZE = 20
 
-  const load = async () => {
-    const res = await runsApi.list(page, PAGE_SIZE, statusFilter || undefined)
-    setRuns(res.items)
-    setTotal(res.total)
+  const load = async (off = offset, filter = statusFilter) => {
+    try {
+      const res = await runsApi.list(PAGE_SIZE, off, filter || undefined)
+      setRuns(res)
+      setHasMore(res.length === PAGE_SIZE)
+    } catch (e) { console.error(e) }
   }
 
-  useEffect(() => { load() }, [page, statusFilter])
+  useEffect(() => {
+    setOffset(0)
+    load(0, statusFilter)
+  }, [statusFilter])
 
   useWebSocket({
     onEvent: (ev) => {
       if (ev.event_type.startsWith('run.') || ev.event_type.startsWith('sandbox.')) load()
     },
   })
+
+  const page = Math.floor(offset / PAGE_SIZE) + 1
 
   return (
     <div className="space-y-4">
@@ -116,27 +148,23 @@ export default function Runs() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-rvp-border text-xs text-gray-500 text-left">
-              <th className="px-4 py-3">Run</th>
-              <th className="px-4 py-3">Version</th>
+              <th className="px-4 py-3">Run ID</th>
+              <th className="px-4 py-3">Release</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Pass Rate</th>
-              <th className="px-4 py-3">Tests</th>
-              <th className="px-4 py-3">Triggered</th>
-              <th className="px-4 py-3">Created</th>
+              <th className="px-4 py-3">Triggered By</th>
+              <th className="px-4 py-3">Queued</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-rvp-border/50">
             {runs.map(r => (
-              <tr key={r.run_id} className="hover:bg-white/5 transition-colors">
+              <tr key={r.id} className="hover:bg-white/5 transition-colors">
                 <td className="px-4 py-3">
-                  <Link to={`/runs/${r.run_id}`} className="text-rvp-primary hover:underline font-mono text-xs">
-                    {r.run_id.slice(0, 8)}
+                  <Link to={`/runs/${r.id}`} className="text-rvp-primary hover:underline font-mono text-xs">
+                    {r.id.slice(0, 8)}
                   </Link>
-                  {r.pr_number && (
-                    <span className="ml-2 text-xs text-gray-500">PR #{r.pr_number}</span>
-                  )}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-gray-300">{r.node_version}</td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-300">{r.release_tag}</td>
                 <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
                 <td className="px-4 py-3">
                   {r.pass_rate != null ? (
@@ -145,33 +173,33 @@ export default function Runs() {
                     </span>
                   ) : '—'}
                 </td>
-                <td className="px-4 py-3 text-gray-400 text-xs">
-                  {r.total_tests > 0 ? `${r.passed_tests}/${r.total_tests}` : '—'}
-                </td>
                 <td className="px-4 py-3 text-xs text-gray-500">{r.triggered_by}</td>
                 <td className="px-4 py-3 text-xs text-gray-500">
-                  {format(new Date(r.created_at), 'MMM d, HH:mm')}
+                  {format(new Date(r.queued_at), 'MMM d, HH:mm')}
                 </td>
               </tr>
             ))}
             {runs.length === 0 && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 text-sm">No runs found</td></tr>
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 text-sm">No runs found</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
       {/* Pagination */}
-      {total > PAGE_SIZE && (
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-gray-500">{total} total</span>
-          <div className="flex gap-2">
-            <button className="btn-ghost" disabled={page === 1} onClick={() => setPage(p => p - 1)}>← Prev</button>
-            <span className="text-gray-400 px-2 py-1">Page {page}</span>
-            <button className="btn-ghost" disabled={page * PAGE_SIZE >= total} onClick={() => setPage(p => p + 1)}>Next →</button>
-          </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-gray-500">Page {page}</span>
+        <div className="flex gap-2">
+          <button className="btn-ghost" disabled={offset === 0}
+            onClick={() => { const o = Math.max(0, offset - PAGE_SIZE); setOffset(o); load(o) }}>
+            ← Prev
+          </button>
+          <button className="btn-ghost" disabled={!hasMore}
+            onClick={() => { const o = offset + PAGE_SIZE; setOffset(o); load(o) }}>
+            Next →
+          </button>
         </div>
-      )}
+      </div>
 
       {showModal && (
         <TriggerModal onClose={() => setShowModal(false)} onCreated={(r) => setRuns(rs => [r, ...rs])} />

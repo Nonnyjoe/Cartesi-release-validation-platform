@@ -15,9 +15,9 @@ export function TestResultCard({ result }: Props) {
         onClick={() => setOpen(!open)}
       >
         <StatusBadge status={result.status} />
-        <span className="flex-1 text-sm font-medium text-gray-200">{result.definition_name}</span>
+        <span className="flex-1 text-sm font-medium text-gray-200">{result.test_name}</span>
         {result.duration_ms != null && (
-          <span className="text-xs text-gray-500">{(result.duration_ms / 1000).toFixed(1)}s</span>
+          <span className="text-xs text-gray-500">{(result.duration_ms / 1000).toFixed(2)}s</span>
         )}
         <span className="text-gray-500 text-xs">{open ? '▲' : '▼'}</span>
       </button>
@@ -29,27 +29,33 @@ export function TestResultCard({ result }: Props) {
               {result.error_message}
             </div>
           )}
-          {result.assertions.map((a, i) => (
+          {result.assertion_results.length === 0 && (
+            <div className="px-4 py-3 text-xs text-gray-500">No assertions</div>
+          )}
+          {result.assertion_results.map((a, i) => (
             <div key={i} className={clsx('px-4 py-2 flex gap-3 text-xs', a.passed ? '' : 'bg-rvp-error/5')}>
               <span className={a.passed ? 'text-rvp-success' : 'text-rvp-error'}>
                 {a.passed ? '✓' : '✗'}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="text-gray-300">{a.description}</div>
-                <div className="text-gray-500 mt-0.5">type: {a.assertion_type}</div>
-                {!a.passed && a.error && (
-                  <div className="text-rvp-error mt-1 font-mono break-all">{a.error}</div>
+                <div className="text-gray-300">{a.assertion_type}</div>
+                {a.detail && (
+                  <div className="text-gray-500 mt-0.5 font-mono break-all">{a.detail}</div>
                 )}
-                {!a.passed && a.expected != null && (
+                {!a.passed && (a.expected != null || a.actual != null) && (
                   <div className="mt-1 grid grid-cols-2 gap-2">
-                    <div>
-                      <div className="text-gray-500 mb-0.5">expected</div>
-                      <pre className="text-gray-300 text-xs overflow-auto">{JSON.stringify(a.expected, null, 2)}</pre>
-                    </div>
-                    <div>
-                      <div className="text-gray-500 mb-0.5">actual</div>
-                      <pre className="text-rvp-error text-xs overflow-auto">{JSON.stringify(a.actual, null, 2)}</pre>
-                    </div>
+                    {a.expected != null && (
+                      <div>
+                        <div className="text-gray-500 mb-0.5">expected</div>
+                        <pre className="text-gray-300 text-xs overflow-auto">{JSON.stringify(a.expected, null, 2)}</pre>
+                      </div>
+                    )}
+                    {a.actual != null && (
+                      <div>
+                        <div className="text-gray-500 mb-0.5">actual</div>
+                        <pre className="text-rvp-error text-xs overflow-auto">{JSON.stringify(a.actual, null, 2)}</pre>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

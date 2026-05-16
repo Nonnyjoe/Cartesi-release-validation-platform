@@ -1,6 +1,7 @@
 import type {
-  Run, TestResult, TestDefinition, Sandbox,
+  Run, RunReport, TestDefinition, Sandbox,
   AISession, SuggestedAction, PaginatedResponse, QueueDepths,
+  ReleaseEntry, CliRelease, SdkRelease, ContractsRelease,
 } from './types'
 
 const BASE = '/api'
@@ -19,39 +20,48 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ─── Runs ─────────────────────────────────────────────────────────────────────
 export const runsApi = {
-  list: (page = 1, pageSize = 20, status?: string) => {
-    const q = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  /** Returns the raw array from GET /runs (limit/offset based, no total). */
+  list: (limit = 20, offset = 0, status?: string) => {
+    const q = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     if (status) q.set('status', status)
-    return request<PaginatedResponse<Run>>(`/runs?${q}`)
+    return request<Run[]>(`/runs?${q}`)
   },
   get: (runId: string) => request<Run>(`/runs/${runId}`),
   create: (payload: {
-    node_version: string
-    pr_number?: number
-    repo_url?: string
-    triggered_by?: string
-    priority?: number
-  }) => request<Run>('/runs', { method: 'POST', body: JSON.stringify(payload) }),
-  cancel: (runId: string) => request<Run>(`/runs/${runId}/cancel`, { method: 'POST' }),
-  results: (runId: string) => request<TestResult[]>(`/runs/${runId}/results`),
+    release_tag:       string
+    image_tag:         string
+    priority?:         number
+    triggered_by?:     string
+    triggered_by_user?: string
+  }) =>
+    request<Run>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        triggered_by: 'user',
+        priority: 5,
+        ...payload,
+      }),
+    }),
+  cancel: (runId: string) =>
+    request<{ status: string; run_id: string }>(`/runs/${runId}/cancel`, { method: 'POST' }),
+  /** Fetch full report with test results for a run. */
+  report: (runId: string) => request<RunReport>(`/reports/${runId}`),
 }
 
 // ─── Test definitions ─────────────────────────────────────────────────────────
 export const testsApi = {
   list: () => request<TestDefinition[]>('/tests'),
   get: (id: string) => request<TestDefinition>(`/tests/${id}`),
-  create: (payload: { name: string; content: string }) =>
-    request<TestDefinition>('/tests', { method: 'POST', body: JSON.stringify(payload) }),
-  update: (id: string, payload: { enabled?: boolean; content?: string }) =>
-    request<TestDefinition>(`/tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  /** content must be YAML-frontmatter + markdown body, e.g. "---\nid: ...\n---\nDescription" */
+  create: (content: string) =>
+    request<TestDefinition>('/tests', { method: 'POST', body: JSON.stringify({ content }) }),
+  toggle: (id: string, is_active: boolean) =>
+    request<TestDefinition>(`/tests/${id}`, { method: 'PATCH', body: JSON.stringify({ is_active }) }),
 }
 
 // ─── Sandboxes ────────────────────────────────────────────────────────────────
 export const sandboxesApi = {
-  list: (status?: string) => {
-    const q = status ? `?status=${status}` : ''
-    return request<Sandbox[]>(`/sandboxes${q}`)
-  },
+  list: () => request<Sandbox[]>('/sandboxes'),
   get: (id: string) => request<Sandbox>(`/sandboxes/${id}`),
 }
 
@@ -61,9 +71,9 @@ export const sessionsApi = {
     request<PaginatedResponse<AISession>>(`/sessions?page=${page}&page_size=${pageSize}`),
   get: (id: string) => request<AISession>(`/sessions/${id}`),
   create: (payload: {
-    mode: string
-    run_id?: string
-    goal?: string
+    mode:       string
+    run_id?:    string
+    goal?:      string
     sandbox_id?: string
   }) => request<AISession>('/sessions', { method: 'POST', body: JSON.stringify(payload) }),
   sendMessage: (id: string, message: string) =>
@@ -82,6 +92,43 @@ export const sessionsApi = {
       method: 'POST',
       body: JSON.stringify({ status }),
     }),
+}
+
+// ─── Release catalog ──────────────────────────────────────────────────────────
+export const releasesApi = {
+  list: () => request<ReleaseEntry[]>('/releases'),
+  sync: () => request<{ synced: number }>('/releases/sync', { method: 'POST' }),
+  add: (payload: { tag: string; image_tag?: string; channel?: string; label?: string }) =>
+    request<ReleaseEntry>('/releases', { method: 'POST', body: JSON.stringify(payload) }),
+  remove: (tag: string) => request<void>(`/releases/${encodeURIComponent(tag)}`, { method: 'DELETE' }),
+  updateToolchain: (tag: string, payload: {
+    sdk_version?: string
+    cli_version?: string
+    devnet_version?: string
+    contracts_version?: string
+  }) =>
+    request<ReleaseEntry>(`/releases/${encodeURIComponent(tag)}/toolchain`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+}
+
+// ─── CLI release catalog ──────────────────────────────────────────────────────
+export const cliReleasesApi = {
+  list: () => request<CliRelease[]>('/releases/cli'),
+  sync: () => request<{ synced: number }>('/releases/cli/sync', { method: 'POST' }),
+}
+
+// ─── SDK release catalog ──────────────────────────────────────────────────────
+export const sdkReleasesApi = {
+  list: () => request<SdkRelease[]>('/releases/sdk'),
+  sync: () => request<{ synced: number }>('/releases/sdk/sync', { method: 'POST' }),
+}
+
+// ─── Contracts release catalog ────────────────────────────────────────────────
+export const contractsReleasesApi = {
+  list: () => request<ContractsRelease[]>('/releases/contracts'),
+  sync: () => request<{ synced: number }>('/releases/contracts/sync', { method: 'POST' }),
 }
 
 // ─── Queues ───────────────────────────────────────────────────────────────────
