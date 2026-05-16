@@ -2,13 +2,13 @@
 #  cartesi-rvp-sandbox:base
 #  Pre-built image for each ephemeral test sandbox.
 #  Contains: Docker CLI (DinD via socket mount), Anvil (Foundry),
-#            Cartesi CLI, Python test deps.
+#            Cartesi CLI (npm), Python test deps.
 # ─────────────────────────────────────────────────────────────
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     FOUNDRY_DIR=/root/.foundry \
-    PATH="/root/.foundry/bin:/root/.cartesi/bin:${PATH}"
+    PATH="/root/.foundry/bin:${PATH}"
 
 # ── System deps ───────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     netcat \
     docker.io \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Foundry (includes Anvil, Cast, Forge) ─────────────────────
@@ -30,8 +32,10 @@ RUN curl -L https://foundry.paradigm.xyz | bash \
     && /root/.foundry/bin/foundryup
 
 # ── Cartesi CLI ───────────────────────────────────────────────
-RUN curl -fsSL https://github.com/cartesi/cli/releases/latest/download/cartesi-linux-x64.tar.gz \
-    | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/cartesi
+# The CLI is NOT baked into this image. The provisioner builds a
+# per-release cartesi-rvp-cli:<cli_version> image on-demand and starts
+# it as a cli-tools sidecar in each sandbox's Docker network.
+# For local debugging, install manually: npm install -g @cartesi/cli@<ver>
 
 # ── Python test dependencies ──────────────────────────────────
 COPY requirements.txt /tmp/sandbox-requirements.txt
