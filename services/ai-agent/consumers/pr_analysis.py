@@ -77,7 +77,7 @@ class PRAnalysisConsumer:
                 text("""
                     INSERT INTO ai.analyses
                       (id, release_tag, pr_numbers, changelog, coverage_gaps, suggestions, raw_response)
-                    VALUES (:id, :tag, :prs, :cl, :gaps::jsonb, :sugg::jsonb, :raw)
+                    VALUES (:id, :tag, :prs, :cl, CAST(:gaps AS jsonb), CAST(:sugg AS jsonb), :raw)
                 """),
                 {
                     "id":   analysis_id,

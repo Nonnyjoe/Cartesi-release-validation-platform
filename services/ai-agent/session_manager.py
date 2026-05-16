@@ -4,6 +4,7 @@ Manages the lifecycle of all three session modes.
 Persists session state to ai.sessions in PostgreSQL.
 Streams events to the publisher (RabbitMQ + Redis).
 """
+import asyncio
 import json
 import logging
 import os
@@ -72,7 +73,7 @@ class SessionManager:
                        tool_call_count, total_tokens)
                     VALUES
                       (:id, :sbx, :run, :mode, :goal, :base, :status,
-                       '[]'::jsonb, '[]'::jsonb, :findings::jsonb, :by, :tc, :tok)
+                       '[]'::jsonb, '[]'::jsonb, CAST(:findings AS jsonb), :by, :tc, :tok)
                     ON CONFLICT (id) DO UPDATE SET
                       status=EXCLUDED.status,
                       findings=EXCLUDED.findings,
