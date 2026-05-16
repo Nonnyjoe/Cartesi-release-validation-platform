@@ -1,8 +1,9 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────
 #  Cartesi RVP — docker-compose.yml
 #  Single command: docker compose up --build
+#
+#  Each application service loads its own env file from
+#  services/<name>/.env  (copy from services/<name>/.env.example)
 # ─────────────────────────────────────────────
 
 networks:
@@ -15,6 +16,9 @@ volumes:
   postgres-data:
   rabbitmq-data:
   redis-data:
+  # Machine snapshot for v2.x sandbox testing.
+  # Populate with: make build-test-app
+  rvp-test-snapshot:
 
 services:
 
@@ -87,10 +91,12 @@ services:
     build:
       context: ./services/orchestrator
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/orchestrator/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
     ports:
@@ -112,14 +118,19 @@ services:
     build:
       context: ./services/sandbox-manager
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/sandbox-manager/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
       MAX_SANDBOXES: ${MAX_SANDBOXES:-5}
       SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-2}
       SANDBOX_MEMORY_LIMIT: ${SANDBOX_MEMORY_LIMIT:-4g}
+      # Named volume used as the machine snapshot for v2.x sandboxes.
+      # Override to use a different volume name.
+      TEST_SNAPSHOT_VOLUME: ${TEST_SNAPSHOT_VOLUME:-rvp-test-snapshot}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./shared:/app/shared:ro
@@ -135,12 +146,15 @@ services:
     build:
       context: ./services/test-runner
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/test-runner/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - ./shared:/app/shared:ro
     networks:
       - rvp-internal
@@ -154,13 +168,14 @@ services:
     build:
       context: ./services/ai-agent
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/ai-agent/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     volumes:
       - ./shared:/app/shared:ro
     networks:
@@ -177,17 +192,21 @@ services:
     build:
       context: ./services/github-watcher
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/github-watcher/.env
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
     volumes:
       - ./shared:/app/shared:ro
     networks:
       - rvp-internal
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
 
@@ -195,11 +214,13 @@ services:
     build:
       context: ./services/notifier
       dockerfile: Dockerfile
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
-    env_file: .env
+    env_file: ./services/notifier/.env
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
     volumes:
       - ./shared:/app/shared:ro
     networks:

@@ -85,7 +85,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA tests GRANT SELECT ON TABLES TO rvp_orchestra
 -- ─────────────────────────────────────────────────────────────
 
 CREATE TYPE run_status AS ENUM (
-  'queued', 'provisioning', 'running', 'completed', 'failed', 'cancelled'
+  'queued', 'provisioning', 'running', 'completed', 'failed', 'warning', 'cancelled'
 );
 
 CREATE TYPE sandbox_status AS ENUM (
@@ -308,6 +308,101 @@ CREATE TABLE github.releases (
 
 CREATE INDEX idx_releases_tag_name ON github.releases (tag_name);
 CREATE INDEX idx_releases_detected_at ON github.releases (detected_at DESC);
+
+-- Curated catalog of known/tested rollups-node releases
+CREATE TABLE IF NOT EXISTS github.release_catalog (
+  tag                TEXT PRIMARY KEY,
+  image_tag          TEXT NOT NULL,        -- primary Docker image for this release
+  sdk_version        TEXT,                 -- v2.x: @cartesi/sdk version (= Docker image tag suffix)
+  cli_version        TEXT,                 -- v2.x: @cartesi/cli version that ships with this node release
+  node_major_version SMALLINT,             -- 1 or 2
+  channel            TEXT NOT NULL DEFAULT 'stable',  -- stable | alpha | beta
+  label              TEXT,
+  is_active          BOOLEAN NOT NULL DEFAULT true,
+  added_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at       TIMESTAMPTZ,
+  downloads          INTEGER DEFAULT 0,
+  body               TEXT,
+  html_url           TEXT,
+  devnet_version     TEXT,                 -- @cartesi/devnet version
+  contracts_version  TEXT                  -- rollups-contracts version
+);
+
+-- Seed with known releases.
+-- v1.x: Docker Hub (docker.io/cartesi/rollups-node:<ver>), no 'v' prefix in image tag.
+-- v2.x: SDK runtime image (cartesi/rollups-runtime:<sdk_version>).
+--       cli_version is the @cartesi/cli version that ships with the node release.
+INSERT INTO github.release_catalog (tag, image_tag, sdk_version, cli_version, node_major_version, channel, label) VALUES
+  ('v1.5.1',          'cartesi/rollups-node:1.5.1',              NULL,                NULL,               1, 'stable', 'v1.5.1 (stable)'),
+  ('v2.0.0-alpha.11', 'cartesi/rollups-runtime:0.12.0-alpha.39', '0.12.0-alpha.39',  '2.0.0-alpha.34',  2, 'alpha',  'v2.0.0-alpha.11'),
+  ('v2.0.0-alpha.10', 'cartesi/rollups-runtime:0.12.0-alpha.27', '0.12.0-alpha.27',  NULL,              2, 'alpha',  'v2.0.0-alpha.10'),
+  ('v2.0.0-alpha.9',  'cartesi/rollups-runtime:0.12.0-alpha.27', '0.12.0-alpha.27',  '2.0.0-alpha.22',  2, 'alpha',  'v2.0.0-alpha.9'),
+  ('v2.0.0-alpha.8',  'cartesi/rollups-runtime:0.12.0-alpha.23', '0.12.0-alpha.23',  '2.0.0-alpha.19',  2, 'alpha',  'v2.0.0-alpha.8'),
+  ('v2.0.0-alpha.7',  'cartesi/rollups-runtime:0.12.0-alpha.22', '0.12.0-alpha.22',  '2.0.0-alpha.13',  2, 'alpha',  'v2.0.0-alpha.7')
+ON CONFLICT (tag) DO NOTHING;
+
+-- CLI release catalog (releases from cartesi/cli repo, major v2.x)
+CREATE TABLE IF NOT EXISTS github.cli_catalog (
+  tag              TEXT PRIMARY KEY,
+  channel          TEXT NOT NULL DEFAULT 'alpha',
+  label            TEXT,
+  is_active        BOOLEAN NOT NULL DEFAULT true,
+  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at     TIMESTAMPTZ,
+  downloads        INTEGER DEFAULT 0,
+  body             TEXT,
+  html_url         TEXT,
+  node_release_tag TEXT,  -- rollups-node release this CLI targets
+  sdk_tag          TEXT,  -- SDK release this CLI pairs with
+  devnet_tag       TEXT,  -- @cartesi/devnet version this CLI ships
+  contracts_tag    TEXT   -- contracts version (via devnet)
+);
+
+-- SDK release catalog (releases from cartesi/cli repo, major v0.x)
+CREATE TABLE IF NOT EXISTS github.sdk_catalog (
+  tag              TEXT PRIMARY KEY,
+  channel          TEXT NOT NULL DEFAULT 'alpha',
+  label            TEXT,
+  is_active        BOOLEAN NOT NULL DEFAULT true,
+  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at     TIMESTAMPTZ,
+  downloads        INTEGER DEFAULT 0,
+  body             TEXT,
+  html_url         TEXT,
+  node_release_tag TEXT,  -- rollups-node release this SDK targets
+  cli_tag          TEXT   -- CLI release this SDK pairs with
+);
+
+-- Rollups-contracts release catalog
+CREATE TABLE IF NOT EXISTS github.contracts_catalog (
+  tag              TEXT PRIMARY KEY,
+  channel          TEXT NOT NULL DEFAULT 'alpha',
+  label            TEXT,
+  is_active        BOOLEAN NOT NULL DEFAULT true,
+  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at     TIMESTAMPTZ,
+  downloads        INTEGER DEFAULT 0,
+  body             TEXT,
+  html_url         TEXT,
+  devnet_tag       TEXT,
+  cli_tag          TEXT,
+  node_release_tag TEXT,
+  sdk_tag          TEXT
+);
+
+INSERT INTO github.cli_catalog (tag, channel, label, node_release_tag, sdk_tag, devnet_tag, contracts_tag) VALUES
+  ('v2.0.0-alpha.34', 'alpha', 'v2.0.0-alpha.34', 'v2.0.0-alpha.11', 'v0.12.0-alpha.39', NULL, NULL),
+  ('v2.0.0-alpha.22', 'alpha', 'v2.0.0-alpha.22', 'v2.0.0-alpha.9',  'v0.12.0-alpha.27', NULL, NULL),
+  ('v2.0.0-alpha.19', 'alpha', 'v2.0.0-alpha.19', 'v2.0.0-alpha.8',  'v0.12.0-alpha.23', NULL, NULL),
+  ('v2.0.0-alpha.13', 'alpha', 'v2.0.0-alpha.13', 'v2.0.0-alpha.7',  'v0.12.0-alpha.22', NULL, NULL)
+ON CONFLICT (tag) DO NOTHING;
+
+INSERT INTO github.sdk_catalog (tag, channel, label, node_release_tag, cli_tag) VALUES
+  ('v0.12.0-alpha.39', 'alpha', 'v0.12.0-alpha.39', 'v2.0.0-alpha.11', 'v2.0.0-alpha.34'),
+  ('v0.12.0-alpha.27', 'alpha', 'v0.12.0-alpha.27', 'v2.0.0-alpha.9',  'v2.0.0-alpha.22'),
+  ('v0.12.0-alpha.23', 'alpha', 'v0.12.0-alpha.23', 'v2.0.0-alpha.8',  'v2.0.0-alpha.19'),
+  ('v0.12.0-alpha.22', 'alpha', 'v0.12.0-alpha.22', 'v2.0.0-alpha.7',  'v2.0.0-alpha.13')
+ON CONFLICT (tag) DO NOTHING;
 
 
 -- ─────────────────────────────────────────────────────────────

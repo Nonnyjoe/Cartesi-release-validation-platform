@@ -5,7 +5,7 @@
   "users": [
     {
       "name": "rvp",
-      "password_hash": "",
+      "password_hash": "U2Nn4U7A+8lJ63Mng4wzybjS8EaR4NRy4t7n8Qr6B/sXo4VW",
       "hashing_algorithm": "rabbit_password_hashing_sha256",
       "tags": ["administrator"]
     }
@@ -125,10 +125,7 @@
       "vhost": "/",
       "durable": true,
       "auto_delete": false,
-      "arguments": {
-        "x-dead-letter-exchange": "rvp.dlx",
-        "x-dead-letter-routing-key": "tests.results.dlq"
-      }
+      "arguments": {}
     },
     {
       "name": "tests.results.dlq",
@@ -158,13 +155,6 @@
       "auto_delete": false,
       "arguments": {}
     },
-    {
-      "name": "notify.dashboard",
-      "vhost": "/",
-      "durable": true,
-      "auto_delete": false,
-      "arguments": {}
-    }
   ],
   "bindings": [
     {
@@ -235,14 +225,6 @@
       "source": "rvp.notify",
       "vhost": "/",
       "destination": "notify.discord",
-      "destination_type": "queue",
-      "routing_key": "",
-      "arguments": {}
-    },
-    {
-      "source": "rvp.notify",
-      "vhost": "/",
-      "destination": "notify.dashboard",
       "destination_type": "queue",
       "routing_key": "",
       "arguments": {}
