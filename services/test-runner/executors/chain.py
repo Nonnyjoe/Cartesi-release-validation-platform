@@ -7,7 +7,7 @@ import time
 import logging
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext
+from .base import AssertionExecutor, AssertionResult, SandboxContext, SANDBOX_HOST
 
 log = logging.getLogger("test-runner.executor.chain")
 
@@ -23,8 +23,8 @@ class ChainTxExecutor(AssertionExecutor):
         app_addr = assertion.get("app_address", "0x0000000000000000000000000000000000000001")
         t0 = time.monotonic()
 
-        # Use the Cartesi node's HTTP advance endpoint
-        url = f"http://localhost:{ctx.node_port}"
+        # Use the Cartesi node's HTTP advance endpoint via SANDBOX_HOST
+        url = f"http://{SANDBOX_HOST}:{ctx.node_port}"
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:

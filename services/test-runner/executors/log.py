@@ -18,7 +18,13 @@ class LogContainsExecutor(AssertionExecutor):
     assertion_type = "log_contains"
 
     def __init__(self):
-        self._docker = docker.from_env()
+        self._docker = None  # lazy — connect on first use
+
+    @property
+    def docker(self):
+        if self._docker is None:
+            self._docker = docker.from_env()
+        return self._docker
 
     async def execute(self, assertion: dict, ctx: SandboxContext) -> AssertionResult:
         pattern   = assertion.get("pattern", "")
@@ -27,7 +33,7 @@ class LogContainsExecutor(AssertionExecutor):
 
         container_name = f"rvp-{component}-{ctx.sandbox_id[:8]}"
         try:
-            container = self._docker.containers.get(container_name)
+            container = self.docker.containers.get(container_name)
             logs = container.logs(stdout=True, stderr=True, tail=500).decode("utf-8", errors="replace")
             found = bool(re.search(pattern, logs, re.IGNORECASE))
             return AssertionResult(

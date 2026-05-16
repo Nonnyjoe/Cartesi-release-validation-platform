@@ -1,7 +1,8 @@
 """
 services/test-runner/consumers/test_commands.py
 Consumes tests.commands queue.
-For each command: runs the test, writes result to DB, publishes to tests.results.
+For each command: checks for cancellation, runs the test, writes result to DB,
+publishes to tests.results.
 """
 import asyncio
 import json
@@ -27,6 +28,21 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").replace(
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _is_run_cancelled(run_id: str) -> bool:
+    """Return True if the run is marked cancelled in orchestrator.runs."""
+    try:
+        async with SessionLocal() as db:
+            row = await db.execute(
+                text("SELECT status FROM orchestrator.runs WHERE id = :id"),
+                {"id": run_id},
+            )
+            r = row.fetchone()
+            return r is not None and r.status == "cancelled"
+    except Exception as exc:
+        log.warning("Could not check cancellation for run %s: %s", run_id, exc)
+        return False
 
 
 class TestCommandConsumer:
@@ -56,12 +72,41 @@ class TestCommandConsumer:
         definition_id      = msg["definition_id"]
         definition_version = msg["definition_version"]
         definition_slug    = msg["definition_slug"]
-        anvil_port         = msg["anvil_port"]
-        node_port          = msg["node_port"]
-        graphql_port       = msg["graphql_port"]
-        docker_network     = msg["docker_network"]
+        anvil_port          = msg["anvil_port"]
+        node_port           = msg["node_port"]
+        graphql_port        = msg["graphql_port"]
+        docker_network      = msg["docker_network"]
+        node_major_version  = int(msg.get("node_major_version", 1))
+        cli_container_name  = msg.get("cli_container_name")
 
         log.info("Test command received: %s (run=%s)", definition_slug, run_id)
+
+        # ── Cancellation check before executing ───────────────────────────────
+        if await _is_run_cancelled(run_id):
+            log.info("Run %s is cancelled — skipping test %s (emitting skipped)",
+                     run_id, definition_slug)
+            result_id = str(uuid.uuid4())
+            now = datetime.now(tz=timezone.utc)
+            async with SessionLocal() as db:
+                await db.execute(
+                    text("""
+                        INSERT INTO tests.results
+                          (id, run_id, sandbox_id, definition_id, definition_version,
+                           status, started_at, completed_at)
+                        VALUES (:id, :run_id, :sandbox_id, :def_id, :def_ver,
+                                'skipped', :ts, :ts)
+                    """),
+                    {"id": result_id, "run_id": run_id, "sandbox_id": sandbox_id,
+                     "def_id": definition_id, "def_ver": definition_version, "ts": now},
+                )
+                await db.commit()
+            await self._publish_result(msg, {
+                "status": "skipped",
+                "duration_ms": 0,
+                "assertion_results": [],
+                "error_message": "Run cancelled",
+            }, result_id, now, now)
+            return
 
         # Fetch definition from hot-reload cache
         definition = await self._loader.get(definition_id)
@@ -76,10 +121,12 @@ class TestCommandConsumer:
             node_port=node_port,
             graphql_port=graphql_port,
             docker_network=docker_network,
+            node_major_version=node_major_version,
+            cli_container_name=cli_container_name,
         )
 
-        # Insert a pending result row
-        result_id = str(uuid.uuid4())
+        # Insert a running result row
+        result_id  = str(uuid.uuid4())
         started_at = datetime.now(tz=timezone.utc)
         async with SessionLocal() as db:
             await db.execute(
@@ -95,7 +142,7 @@ class TestCommandConsumer:
             await db.commit()
 
         # Run the test
-        outcome = await run_test(definition, ctx)
+        outcome      = await run_test(definition, ctx)
         completed_at = datetime.now(tz=timezone.utc)
 
         # Write result to DB
@@ -104,7 +151,7 @@ class TestCommandConsumer:
                 text("""
                     UPDATE tests.results SET
                       status=:status, duration_ms=:dur,
-                      assertion_results=:ar::jsonb, logs=:logs,
+                      assertion_results=CAST(:ar AS jsonb), logs=:logs,
                       error_message=:err, completed_at=:ts
                     WHERE id=:id
                 """),
@@ -120,7 +167,6 @@ class TestCommandConsumer:
             )
             await db.commit()
 
-        # Publish result to tests.results queue
         await self._publish_result(msg, outcome, result_id, started_at, completed_at)
 
     async def _publish_result(self, cmd: dict, outcome: dict, result_id: str,

@@ -6,3 +6,4 @@ gql[aiohttp]>=3.5
 pydantic>=2.7
 pyyaml>=6.0
 web3>=6.15
+docker>=7.1
