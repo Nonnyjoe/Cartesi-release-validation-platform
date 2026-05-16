@@ -83,17 +83,6 @@ async def handle_discord_message(message: aio_pika.IncomingMessage):
         )
 
 
-async def handle_dashboard_message(message: aio_pika.IncomingMessage):
-    """Dashboard events are handled by the orchestrator WS broadcaster.
-    We just ACK them here so the queue doesn't grow unbounded."""
-    async with message.process():
-        try:
-            body = json.loads(message.body)
-            log.debug("Dashboard event: %s", body.get("event_type"))
-        except Exception:
-            pass
-
-
 async def main():
     log.info("Notifier starting up")
 
@@ -102,12 +91,9 @@ async def main():
     await channel.set_qos(prefetch_count=5)
 
     discord_queue = await channel.get_queue("notify.discord")
-    dashboard_queue = await channel.get_queue("notify.dashboard")
-
     await discord_queue.consume(handle_discord_message)
-    await dashboard_queue.consume(handle_dashboard_message)
 
-    log.info("Notifier ready — consuming notify.discord + notify.dashboard")
+    log.info("Notifier ready — consuming notify.discord")
 
     try:
         await asyncio.Future()  # run forever

@@ -5,8 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY --from=shared / /app/shared/
 COPY . .
-COPY ../../shared /app/shared
 
 ENV PYTHONPATH=/app
 
