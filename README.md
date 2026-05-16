@@ -8,6 +8,7 @@
 ## The Problem
 
 Every Cartesi rollups-node release is currently validated entirely by hand:
+
 - Manually run the release Docker image
 - Send transactions via CLI scripts
 - Read logs manually
@@ -22,11 +23,11 @@ There are no formal test scripts — purely manual steps. This is slow, error-pr
 - **Automatically spins up isolated Docker sandbox environments** per test run (sub-5s, ephemeral, guaranteed teardown)
 - **Executes a library of tests** against a specific node release image
 - **Hot-reloads test definitions** from the database — add or modify tests with zero restarts
-- **Uses Claude (Anthropic API)** as an AI agent that can reason about the node, generate payloads, call tools, and adapt tests mid-run *(Phase 3)*
-- **Lets users interactively prompt the agent** to modify, reorder, or manually drive tests *(Phase 3)*
+- **Uses Claude (Anthropic API)** as an AI agent that can reason about the node, generate payloads, call tools, and adapt tests mid-run _(Phase 3)_
+- **Lets users interactively prompt the agent** to modify, reorder, or manually drive tests _(Phase 3)_
 - **Compiles detailed reports** per run with per-assertion pass/fail detail
-- **Notifies the team on Discord** on new releases and test completions *(Phase 5)*
-- **Watches GitHub** for new releases and triggers test runs automatically *(Phase 5)*
+- **Notifies the team on Discord** on new releases and test completions _(Phase 5)_
+- **Watches GitHub** for new releases and triggers test runs automatically _(Phase 5)_
 
 ---
 
@@ -75,18 +76,18 @@ There are no formal test scripts — purely manual steps. This is slow, error-pr
 
 ## Tech Stack
 
-| Layer | Choice | Reason |
-|---|---|---|
-| Orchestrator | Python / FastAPI | Async, WebSocket support, subprocess management |
-| Sandbox Manager | Python + Docker SDK | Programmatic container lifecycle |
-| Test Runner | Python | YAML+MD-driven test definitions, hot-reload from DB |
-| AI Agent | Python + Anthropic Claude API | 200k context, tool use, streaming |
-| Message Broker | RabbitMQ | Priority queues, dead letter queues, management UI |
-| Database | PostgreSQL (single instance, per-service schemas) | Isolation without ops overhead |
-| Frontend | React + TypeScript + TailwindCSS | Real-time WebSocket dashboard |
-| Live Relay | Redis (pub/sub only) | Broadcasting logs to multiple browser tabs |
-| Containerisation | Docker + Docker Compose | Single command to bring up the entire platform |
-| Discord | Webhooks (v1) | Simple, no bot infrastructure needed |
+| Layer            | Choice                                            | Reason                                              |
+| ---------------- | ------------------------------------------------- | --------------------------------------------------- |
+| Orchestrator     | Python / FastAPI                                  | Async, WebSocket support, subprocess management     |
+| Sandbox Manager  | Python + Docker SDK                               | Programmatic container lifecycle                    |
+| Test Runner      | Python                                            | YAML+MD-driven test definitions, hot-reload from DB |
+| AI Agent         | Python + Anthropic Claude API                     | 200k context, tool use, streaming                   |
+| Message Broker   | RabbitMQ                                          | Priority queues, dead letter queues, management UI  |
+| Database         | PostgreSQL (single instance, per-service schemas) | Isolation without ops overhead                      |
+| Frontend         | React + TypeScript + TailwindCSS                  | Real-time WebSocket dashboard                       |
+| Live Relay       | Redis (pub/sub only)                              | Broadcasting logs to multiple browser tabs          |
+| Containerisation | Docker + Docker Compose                           | Single command to bring up the entire platform      |
+| Discord          | Webhooks (v1)                                     | Simple, no bot infrastructure needed                |
 
 ---
 
@@ -210,12 +211,12 @@ This starts in order: PostgreSQL → RabbitMQ → Redis → all application serv
 
 Services available after boot:
 
-| Service | URL |
-|---|---|
-| Orchestrator API | http://localhost:8000 |
-| API Docs (Swagger) | http://localhost:8000/docs |
-| RabbitMQ Management UI | http://localhost:15672 |
-| Dashboard | http://localhost:3000 |
+| Service                | URL                        |
+| ---------------------- | -------------------------- |
+| Orchestrator API       | http://localhost:8000      |
+| API Docs (Swagger)     | http://localhost:8000/docs |
+| RabbitMQ Management UI | http://localhost:15672     |
+| Dashboard              | http://localhost:3000      |
 
 ### 3. Seed the test definitions
 
@@ -274,31 +275,31 @@ All messages share a standard envelope:
 ```json
 {
   "event_id": "uuid-v4",
-  "run_id":   "uuid-v4",
-  "service":  "orchestrator",
-  "ts":       "2026-05-01T12:00:00Z",
-  "payload":  {}
+  "run_id": "uuid-v4",
+  "service": "orchestrator",
+  "ts": "2026-05-01T12:00:00Z",
+  "payload": {}
 }
 ```
 
 Exchanges and queues pre-declared via `infra/rabbitmq/definitions.json`:
 
-| Exchange | Type | Queues |
-|---|---|---|
-| `rvp.releases` | fanout | `releases.orchestrator`, `releases.ai-agent` |
-| `rvp.sandbox` | direct | `sandbox.queue` (priority 0–10), `sandbox.events` |
-| `rvp.tests` | direct | `tests.commands`, `tests.results` |
-| `rvp.ai` | direct | `ai.requests`, `ai.results` |
-| `rvp.notify` | fanout | `notify.discord`, `notify.dashboard` |
-| `rvp.dlx` | direct | `sandbox.queue.dlq`, `tests.results.dlq` |
+| Exchange       | Type   | Queues                                            |
+| -------------- | ------ | ------------------------------------------------- |
+| `rvp.releases` | fanout | `releases.orchestrator`, `releases.ai-agent`      |
+| `rvp.sandbox`  | direct | `sandbox.queue` (priority 0–10), `sandbox.events` |
+| `rvp.tests`    | direct | `tests.commands`, `tests.results`                 |
+| `rvp.ai`       | direct | `ai.requests`, `ai.results`                       |
+| `rvp.notify`   | fanout | `notify.discord`, `notify.dashboard`              |
+| `rvp.dlx`      | direct | `sandbox.queue.dlq`, `tests.results.dlq`          |
 
 Sandbox requests use a **priority queue** (`x-max-priority: 10`):
 
-| Priority | Source |
-|---|---|
-| 9 | Automated GitHub release trigger |
-| 5 | User-triggered from dashboard |
-| 1 | Scheduled / recurring |
+| Priority | Source                           |
+| -------- | -------------------------------- |
+| 9        | Automated GitHub release trigger |
+| 5        | User-triggered from dashboard    |
+| 1        | Scheduled / recurring            |
 
 ---
 
@@ -334,20 +335,19 @@ assertions:
     endpoint: /healthz
     expect: 200
 ---
-
 ## Description
 Human-readable explanation of what this test covers.
 ```
 
 ### Assertion Types
 
-| Type | What it does |
-|---|---|
-| `graphql` | Queries the node GraphQL API, asserts on a JSON path in the response |
-| `http_status` | GET to an endpoint, checks HTTP status code |
-| `log_contains` | Scans container logs for a regex pattern |
-| `chain_tx` | Sends an advance-state input to the InputBox contract |
-| `voucher` | Verifies vouchers appear via GraphQL with a valid proof |
+| Type           | What it does                                                         |
+| -------------- | -------------------------------------------------------------------- |
+| `graphql`      | Queries the node GraphQL API, asserts on a JSON path in the response |
+| `http_status`  | GET to an endpoint, checks HTTP status code                          |
+| `log_contains` | Scans container logs for a regex pattern                             |
+| `chain_tx`     | Sends an advance-state input to the InputBox contract                |
+| `voucher`      | Verifies vouchers appear via GraphQL with a valid proof              |
 
 Adding a new assertion type = one new Python file in `services/test-runner/executors/`.
 
@@ -375,6 +375,7 @@ REQUESTED → QUEUED → PROVISIONING → READY → RUNNING → TEARDOWN → CLO
 ## Sandbox Base Image
 
 `cartesi-rvp-sandbox:base` — pre-built with:
+
 - Docker CLI (host socket mount for DinD)
 - Anvil (Foundry) — local Ethereum chain
 - Cartesi CLI
@@ -414,6 +415,7 @@ POST /runs
 ## Build Progress
 
 ### Phase 1 — Foundation ✅
+
 - [x] Full repo scaffold — all folders and placeholder files
 - [x] `docker-compose.yml` — all 10 services, networks, healthchecks
 - [x] `infra/postgres/init.sql` — 6 schemas, 6 roles, 11 tables, indexes
@@ -422,6 +424,7 @@ POST /runs
 - [x] `shared/constants.py` — all queue/exchange names and status enums
 
 ### Phase 2 — Test Execution ✅
+
 - [x] `sandbox-base/Dockerfile` — Ubuntu 22 + Anvil + Cartesi CLI
 - [x] Orchestrator — FastAPI app, async SQLAlchemy, `/runs` + `/sandboxes` + `/reports` routes, WebSocket relay
 - [x] Sandbox Manager — Docker SDK provisioner, pool tracker, priority queue consumer
@@ -430,6 +433,7 @@ POST /runs
 - [x] Full run flow: trigger → sandbox → tests → results → report → teardown
 
 ### Phase 3 — AI Agent 🔜
+
 - [ ] Context assembler — inject Cartesi docs into Claude system prompt
 - [ ] Agent loop — Claude tool-use agentic loop (observe → reason → act)
 - [ ] 10 agent tools (blockchain, node, graphql, payload gen, time, reporting)
@@ -437,6 +441,7 @@ POST /runs
 - [ ] Session streaming to dashboard WebSocket
 
 ### Phase 4 — Dashboard 🔜
+
 - [ ] Runs list + run detail page (React + TypeScript + Tailwind)
 - [ ] Live log stream via WebSocket
 - [ ] Sandbox pool status view
@@ -444,11 +449,13 @@ POST /runs
 - [ ] Test definition editor (upload MD, preview, validate, save to DB)
 
 ### Phase 5 — GitHub + Discord 🔜
+
 - [ ] GitHub Watcher — polling + webhook handler for new releases
 - [ ] Auto-trigger run on new release (priority 9)
 - [ ] Notifier — Discord embeds for run reports and release alerts
 
 ### Phase 6 — Future
+
 - [ ] Adversarial / chaos mode (agent tries to break the node)
 - [ ] Discord bot for interactive agent conversations
 - [ ] Local model integration (Ollama) for cheap formatting tasks
@@ -492,18 +499,18 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxxx/yyyy
 
 ## Key Design Decisions
 
-| Decision | Choice | Reason |
-|---|---|---|
-| Sandbox isolation | Docker DinD per run | Fast spin-up, true isolation, easy teardown |
-| Message broker | RabbitMQ | Priority queues, DLQ, management UI |
-| DB architecture | Single Postgres, per-service schemas | Isolation without ops overhead |
-| Test format | YAML frontmatter + MD body in DB | Tests as data, hot-reload, no restarts |
-| AI provider | Claude (Anthropic) | Best reasoning, 200k context, tool use |
-| RAG | Skipped in v1 | 200k context window makes it unnecessary |
-| Context injection | Direct assembler into system prompt | Simple, zero extra infrastructure |
-| Live streaming | Claude streaming API → WebSocket | Users see agent reasoning in real time |
-| Redis role | Pub/sub only (dashboard broadcast) | Not inter-service messaging — that's RabbitMQ |
+| Decision          | Choice                               | Reason                                        |
+| ----------------- | ------------------------------------ | --------------------------------------------- |
+| Sandbox isolation | Docker DinD per run                  | Fast spin-up, true isolation, easy teardown   |
+| Message broker    | RabbitMQ                             | Priority queues, DLQ, management UI           |
+| DB architecture   | Single Postgres, per-service schemas | Isolation without ops overhead                |
+| Test format       | YAML frontmatter + MD body in DB     | Tests as data, hot-reload, no restarts        |
+| AI provider       | Claude (Anthropic)                   | Best reasoning, 200k context, tool use        |
+| RAG               | Skipped in v1                        | 200k context window makes it unnecessary      |
+| Context injection | Direct assembler into system prompt  | Simple, zero extra infrastructure             |
+| Live streaming    | Claude streaming API → WebSocket     | Users see agent reasoning in real time        |
+| Redis role        | Pub/sub only (dashboard broadcast)   | Not inter-service messaging — that's RabbitMQ |
 
 ---
 
-*Cartesi RVP — built for the Cartesi team, May 2026.*
+_Cartesi RVP — built for Cartesi, May 2026._
