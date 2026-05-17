@@ -4,7 +4,7 @@ Used by the /sessions route to kick off or inject messages into sessions.
 """
 import json, os
 import aio_pika
-from shared.constants import Exchange, RoutingKey, Queue
+from constants import Exchange, RoutingKey, Queue
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://rvp:rvp_secret@rabbitmq:5672/rvp")
 
@@ -17,19 +17,19 @@ class AIPublisher:
 
     async def publish_session_request(self, payload: dict):
         conn, channel = await self._connect()
-        exchange = await channel.get_exchange(Exchange.AI_AGENT)
+        exchange = await channel.get_exchange(Exchange.AI)
         await exchange.publish(
             aio_pika.Message(
                 body=json.dumps(payload).encode(),
                 content_type="application/json",
             ),
-            routing_key=RoutingKey.AI_SESSION_REQUEST,
+            routing_key=RoutingKey.AI_REQUESTS,
         )
         await conn.close()
 
     async def publish_user_message(self, session_id: str, message: str):
         conn, channel = await self._connect()
-        exchange = await channel.get_exchange(Exchange.AI_AGENT)
+        exchange = await channel.get_exchange(Exchange.AI)
         await exchange.publish(
             aio_pika.Message(
                 body=json.dumps({"session_id": session_id, "message": message}).encode(),

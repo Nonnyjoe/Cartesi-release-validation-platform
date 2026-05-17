@@ -32,6 +32,8 @@ class TestDefinitionOut(BaseModel):
     component: Optional[str] = None
     is_active: bool
     tags: list[str]
+    timeout_seconds: int
+    definition_raw: str
     created_at: str
     updated_at: str
 
@@ -54,6 +56,8 @@ def _row_to_out(row) -> dict:
         "component": row.component,
         "is_active": row.is_active,
         "tags": list(row.tags) if row.tags else [],
+        "timeout_seconds": row.timeout_seconds,
+        "definition_raw": row.definition_raw,
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }

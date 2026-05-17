@@ -95,6 +95,28 @@ def _extract_sdk_from_body(body: str) -> str | None:
     return None
 
 
+def extract_versions_from_cli_body(
+    body: str,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """
+    Parse a @cartesi/cli release body and return:
+      (sdk_version, devnet_version, contracts_version, node_version_targeted)
+
+    All version strings are returned WITHOUT a 'v' prefix — callers apply
+    the correct prefix convention for each catalog table.
+
+    Returns (None, None, None, None) if the body is empty or unparseable.
+    """
+    sdk_version       = _extract_sdk_from_body(body)
+    devnet_m          = _DEVNET_IN_BODY_RE.search(body)
+    devnet_version    = devnet_m.group(1) if devnet_m else None
+    contracts_m       = _CONTRACTS_IN_BODY_RE.search(body)
+    contracts_version = contracts_m.group(1) if contracts_m else None
+    node_m            = _NODE_BUMP_RE.search(body)
+    node_version      = node_m.group(1) if node_m else None
+    return sdk_version, devnet_version, contracts_version, node_version
+
+
 async def _scan_cli_releases(
     node_ver: str,
     github_token: str,

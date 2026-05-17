@@ -50,7 +50,22 @@ async def get_report(run_id: str, db: AsyncSession = Depends(get_db)):
         """),
         {"run_id": run_id},
     )
-    results = [dict(r._mapping) for r in results_rows]
+
+    def _result_row(row) -> dict:
+        return {
+            "id":                str(row.id),
+            "definition_id":     str(row.definition_id),
+            "test_slug":         row.test_slug,
+            "test_name":         row.test_name,
+            "status":            row.status,
+            "duration_ms":       row.duration_ms,
+            "assertion_results": row.assertion_results or [],
+            "error_message":     row.error_message,
+            "started_at":        row.started_at.isoformat() if row.started_at else None,
+            "completed_at":      row.completed_at.isoformat() if row.completed_at else None,
+        }
+
+    results = [_result_row(r) for r in results_rows]
 
     statuses = [r["status"] for r in results]
     total  = len(results)

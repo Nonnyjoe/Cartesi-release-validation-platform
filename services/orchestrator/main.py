@@ -18,6 +18,7 @@ from api.routes.tests import router as tests_router
 from api.routes.sessions import router as sessions_router
 from api.routes.queues import router as queues_router
 from api.routes.health import router as health_router
+from api.routes.apps import router as apps_router
 from api.websocket import router as ws_router, redis_subscriber
 from consumers.sandbox_events import SandboxEventConsumer
 from consumers.test_results import TestResultConsumer
@@ -91,6 +92,7 @@ app.include_router(ws_router,         prefix="/ws",         tags=["websocket"])
 app.include_router(tests_router,      prefix="/tests",      tags=["tests"])
 app.include_router(sessions_router,   prefix="/sessions",   tags=["sessions"])
 app.include_router(queues_router,     prefix="/queues",     tags=["queues"])
+app.include_router(apps_router,       prefix="/apps",       tags=["apps"])
 app.include_router(health_router)
 
 

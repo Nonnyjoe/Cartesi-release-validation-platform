@@ -745,21 +745,13 @@ async def update_toolchain(tag: str, payload: ToolchainUpdateIn,
       contracts_version → devnet_catalog.contracts_tag (for that devnet)
     """
     # Read current state through the JOIN chain
-    row = (await db.execute(text(f"""
+    row = (await db.execute(text("""
         SELECT
             rc.tag,
             rc.cli_tag,
             c.sdk_tag,
             c.devnet_tag,
-            d.contracts_tag,
-            rc.node_major_version,
-            rc.channel, rc.label, rc.is_active,
-            rc.added_at, rc.published_at, rc.downloads, rc.body, rc.html_url,
-            {_IMAGE_TAG_EXPR} AS image_tag,
-            LTRIM(c.sdk_tag, 'v')  AS sdk_version,
-            LTRIM(c.tag, 'v')      AS cli_version,
-            c.devnet_tag           AS devnet_version,
-            d.contracts_tag        AS contracts_version
+            d.contracts_tag
         FROM github.release_catalog rc
         LEFT JOIN github.cli_catalog    c ON c.tag = rc.cli_tag
         LEFT JOIN github.devnet_catalog d ON d.tag = c.devnet_tag

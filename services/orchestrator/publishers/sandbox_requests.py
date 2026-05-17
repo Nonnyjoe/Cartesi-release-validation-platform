@@ -26,6 +26,10 @@ async def publish_sandbox_request(
     devnet_version:    Optional[str] = None,
     contracts_version: Optional[str] = None,
     node_major_version: int = 1,
+    # Application registry fields — present when a run targets a specific dApp
+    app_id:         Optional[str] = None,
+    app_name:       Optional[str] = None,
+    app_github_url: Optional[str] = None,
 ):
     """
     Publish a SandboxRequest to the sandbox.queue priority queue.
@@ -35,8 +39,11 @@ async def publish_sandbox_request(
     the matching @cartesi/cli version in the sandbox:
       v1.x — single rollups-node container, no CLI container
       v2.x — 6-service SDK compose stack + cli-tools container with cli_version
-    devnet_version and contracts_version are passed through for informational
-    purposes and future use.
+
+    app_id / app_name / app_github_url are set when the run targets a registered
+    Cartesi application.  The sandbox-manager will clone the repo, run
+    `cartesi build`, deploy the application contract, and pass the resulting
+    app_address back in the sandbox.ready event.
     """
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     async with connection:
@@ -57,6 +64,10 @@ async def publish_sandbox_request(
             "node_major_version": node_major_version,
             "priority":           priority,
             "requested_by":       requested_by,
+            # Application
+            "app_id":             app_id,
+            "app_name":           app_name,
+            "app_github_url":     app_github_url,
         }).encode()
 
         await exchange.publish(
@@ -69,6 +80,6 @@ async def publish_sandbox_request(
             routing_key="sandbox.queue",
         )
         log.info(
-            "Published sandbox request for run %s (priority=%d, node_major=%d, cli=%s)",
-            run_id, priority, node_major_version, cli_version,
+            "Published sandbox request for run %s (priority=%d, node_major=%d, cli=%s, app=%s)",
+            run_id, priority, node_major_version, cli_version, app_name or "none",
         )

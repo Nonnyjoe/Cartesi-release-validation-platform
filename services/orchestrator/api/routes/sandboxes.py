@@ -3,11 +3,11 @@ services/orchestrator/api/routes/sandboxes.py
 GET /sandboxes        — list active sandboxes
 GET /sandboxes/{id}   — sandbox detail
 """
-import uuid
 from typing import List, Optional
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from db import get_db
 
@@ -17,8 +17,8 @@ router = APIRouter()
 from datetime import datetime
 
 class SandboxResponse(BaseModel):
-    id:               str
-    run_id:           Optional[str] = None
+    id:               UUID
+    run_id:           Optional[UUID] = None
     status:           str
     anvil_port:       Optional[int] = None
     node_port:        Optional[int] = None
