@@ -18,7 +18,7 @@ x-env: &env
 services:
   database:
     container_name: database
-    image: cartesi/rollups-database:0.12.0-alpha.39
+    image: cartesi/rollups-database:${SDK_VERSION}
     environment:
       POSTGRES_PASSWORD: password
     networks:
@@ -35,7 +35,7 @@ services:
 
   evm-reader:
     container_name: evm-reader
-    image: cartesi/rollups-runtime:0.12.0-alpha.39
+    image: cartesi/rollups-runtime:${SDK_VERSION}
     command: cartesi-rollups-evm-reader --default-block latest
     depends_on:
       database:
@@ -49,7 +49,7 @@ services:
 
   advancer:
     container_name: advancer
-    image: cartesi/rollups-runtime:0.12.0-alpha.39
+    image: cartesi/rollups-runtime:${SDK_VERSION}
     command: cartesi-rollups-advancer
     depends_on:
       database:
@@ -67,7 +67,7 @@ services:
 
   validator:
     container_name: validator
-    image: cartesi/rollups-runtime:0.12.0-alpha.39
+    image: cartesi/rollups-runtime:${SDK_VERSION}
     command: cartesi-rollups-validator
     depends_on:
       database:
@@ -81,7 +81,7 @@ services:
 
   claimer:
     container_name: claimer
-    image: cartesi/rollups-runtime:0.12.0-alpha.39
+    image: cartesi/rollups-runtime:${SDK_VERSION}
     command: cartesi-rollups-claimer
     depends_on:
       database:
@@ -95,7 +95,7 @@ services:
 
   jsonrpc-api:
     container_name: jsonrpc-api
-    image: cartesi/rollups-runtime:0.12.0-alpha.39
+    image: cartesi/rollups-runtime:${SDK_VERSION}
     command: cartesi-rollups-jsonrpc-api
     depends_on:
       database:

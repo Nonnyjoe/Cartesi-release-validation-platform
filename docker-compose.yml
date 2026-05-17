@@ -131,9 +131,17 @@ services:
       # Named volume used as the machine snapshot for v2.x sandboxes.
       # Override to use a different volume name.
       TEST_SNAPSHOT_VOLUME: ${TEST_SNAPSHOT_VOLUME:-rvp-test-snapshot}
+      # Timeout (seconds) for cannon contract deployment per sandbox.
+      CONTRACTS_DEPLOY_TIMEOUT: ${CONTRACTS_DEPLOY_TIMEOUT:-300}
+      # Path inside the sandbox-manager container where cannon-deployer build context is mounted.
+      CANNON_DEPLOYER_BUILD_PATH: /app/cannon-deployer
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./shared:/app/shared:ro
+      - ./sandbox-base/cannon-deployer:/app/cannon-deployer:ro
+      # Host-bind for app builds: cartesi build spawns sub-containers that
+      # mount paths under here, so the path must exist on the macOS host.
+      - /tmp/rvp-app-builds:/tmp/rvp-app-builds
     networks:
       - rvp-internal
     depends_on:
