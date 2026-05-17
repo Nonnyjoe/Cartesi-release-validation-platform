@@ -17,6 +17,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 import aio_pika
 from sqlalchemy import text
@@ -24,6 +25,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 from pool import pool
 from provisioner import SandboxProvisioner
+from log_buffer import LogBatchBuffer
 
 log = logging.getLogger("sandbox-manager.consumer")
 
@@ -31,9 +33,8 @@ RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:567
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace(
     "postgresql://", "postgresql+asyncpg://"
 )
-SANDBOX_HEALTH_TIMEOUT = int(os.environ.get("SANDBOX_HEALTH_TIMEOUT", "60"))
-NODE_READY_DELAY       = int(os.environ.get("NODE_READY_DELAY", "15"))
-V2_READY_TIMEOUT       = int(os.environ.get("V2_READY_TIMEOUT", "120"))
+NODE_READY_DELAY = int(os.environ.get("NODE_READY_DELAY", "15"))
+V2_READY_TIMEOUT = int(os.environ.get("V2_READY_TIMEOUT", "120"))
 
 engine       = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -153,7 +154,20 @@ class SandboxQueueConsumer:
         devnet_version     = msg.get("devnet_version")
         contracts_version  = msg.get("contracts_version")
         node_major_version = int(msg.get("node_major_version", 1))
+        # Application registry fields (present when run was triggered with an app_id)
+        app_id             = msg.get("app_id")
+        app_name           = msg.get("app_name")
+        app_github_url     = msg.get("app_github_url")
         sandbox_id         = str(uuid.uuid4())
+
+        # If contracts_version not in message, resolve it from release_catalog via release_tag
+        if not contracts_version and release_tag:
+            contracts_version = await self._resolve_contracts_version(release_tag)
+            if contracts_version:
+                log.info(
+                    "Resolved contracts_version=%s for release_tag=%s",
+                    contracts_version, release_tag,
+                )
 
         acquired = await pool.acquire(sandbox_id, run_id)
         if not acquired:
@@ -179,6 +193,36 @@ class SandboxQueueConsumer:
             await _publish_event(self._channel, "provisioning", sandbox_id, run_id)
 
             # ── Spin up Docker containers ──────────────────────────────────────
+            loop = asyncio.get_event_loop()
+            channel = self._channel
+
+            def step_reporter(step: str, status: str = "ok", **detail):
+                """
+                Called synchronously from the provisioner thread executor.
+                Schedules a step event publish on the async event loop so the
+                orchestrator and dashboard can receive real-time progress.
+                """
+                coro = _publish_event(
+                    channel, "step", sandbox_id, run_id,
+                    step=step, step_status=status,
+                    detail=detail if detail else None,
+                )
+                asyncio.run_coroutine_threadsafe(coro, loop)
+
+            def log_batch_reporter(batch: list):
+                """
+                Called from LogBatchBuffer when a batch of log lines is ready.
+                Publishes a log_batch event to RabbitMQ for the orchestrator to
+                persist into run_logs and broadcast over WebSocket.
+                """
+                coro = _publish_event(
+                    channel, "log_batch", sandbox_id, run_id,
+                    lines=batch,
+                )
+                asyncio.run_coroutine_threadsafe(coro, loop)
+
+            log_buffer = LogBatchBuffer(flush_cb=log_batch_reporter, max_lines=50, max_age_s=2.0)
+
             try:
                 info = await provisioner.provision(
                     sandbox_id, run_id, image_tag, port_offset,
@@ -187,6 +231,10 @@ class SandboxQueueConsumer:
                     cli_version=cli_version,
                     devnet_version=devnet_version,
                     contracts_version=contracts_version,
+                    step_cb=step_reporter,
+                    log_buffer=log_buffer,
+                    app_name=app_name,
+                    app_github_url=app_github_url,
                 )
                 sandbox_provisioned = True
             except Exception as exc:
@@ -199,16 +247,8 @@ class SandboxQueueConsumer:
                                      failure_reason=str(exc))
                 return
 
-            # ── Wait for Anvil to be ready ─────────────────────────────────────
-            anvil_id = info["container_ids"][0] if info["container_ids"] else None
-            if anvil_id:
-                healthy = await provisioner.wait_for_anvil_health(anvil_id, SANDBOX_HEALTH_TIMEOUT)
-                if not healthy:
-                    raise RuntimeError(
-                        f"Anvil did not become healthy within {SANDBOX_HEALTH_TIMEOUT}s"
-                    )
-
             # ── For v2.x: also wait for the jsonrpc-api container to be running ─
+            # (Anvil health check + contract deployment are handled inside provisioner)
             if node_major_version >= 2 and len(info["container_ids"]) >= 7:
                 db_container_id     = info["container_ids"][1]   # database is index 1
                 jsonrpc_container_id = info["container_ids"][-1]  # jsonrpc-api is last
@@ -227,6 +267,7 @@ class SandboxQueueConsumer:
                 return
 
             # ── Mark ready, publish event ──────────────────────────────────────
+            app_address = info.get("app_address")
             async with SessionLocal() as db:
                 await _upsert_sandbox(db, sandbox_id, run_id,
                                       status="ready",
@@ -237,6 +278,14 @@ class SandboxQueueConsumer:
                                       graphql_port=info["graphql_port"],
                                       ready_at=datetime.now(tz=timezone.utc))
 
+                # Persist app_address back to orchestrator.runs so the dashboard can show it
+                if app_address:
+                    await db.execute(
+                        text("UPDATE orchestrator.runs SET app_address = :addr WHERE id = :id"),
+                        {"addr": app_address, "id": run_id},
+                    )
+                    await db.commit()
+
             await _publish_event(
                 self._channel, "ready", sandbox_id, run_id,
                 anvil_port=info["anvil_port"],
@@ -245,6 +294,7 @@ class SandboxQueueConsumer:
                 docker_network=info["docker_network"],
                 container_ids=info["container_ids"],
                 cli_container_name=info.get("cli_container_name"),
+                app_address=app_address,
             )
 
             # ── Wait for tests to finish ───────────────────────────────────────
@@ -302,6 +352,8 @@ class SandboxQueueConsumer:
             sbx = row.fetchone()
 
         if sbx and sbx.container_ids:
+            # per_sandbox_volume is tracked in provisioner's in-memory dict
+            # (no need to store it in the DB — it's derived from sandbox_id)
             await provisioner.teardown(sandbox_id, sbx.container_ids, sbx.docker_network or "")
 
         async with SessionLocal() as db:
@@ -312,6 +364,41 @@ class SandboxQueueConsumer:
             await db.commit()
 
         await _publish_event(self._channel, "closed", sandbox_id, run_id)
+
+    async def _resolve_contracts_version(self, release_tag: str) -> Optional[str]:
+        """
+        Resolve contracts_version for a given node release tag by walking the
+        BCNF FK chain:
+          release_catalog.cli_tag → cli_catalog.tag
+          cli_catalog.devnet_tag  → devnet_catalog.tag
+          devnet_catalog.contracts_tag → contracts_catalog.tag
+
+        After migration 0006 the denormalized columns (contracts_version,
+        node_release_tag) were dropped, so this is the only correct lookup path.
+        """
+        try:
+            async with SessionLocal() as db:
+                row = await db.execute(
+                    text("""
+                        SELECT d.contracts_tag
+                        FROM github.release_catalog rc
+                        LEFT JOIN github.cli_catalog    c ON c.tag = rc.cli_tag
+                        LEFT JOIN github.devnet_catalog d ON d.tag = c.devnet_tag
+                        WHERE rc.tag = :tag
+                        LIMIT 1
+                    """),
+                    {"tag": release_tag},
+                )
+                r = row.fetchone()
+                if not r:
+                    return None
+                return r.contracts_tag or None
+        except Exception as exc:
+            log.warning(
+                "Could not resolve contracts_version for release_tag=%s: %s",
+                release_tag, exc,
+            )
+            return None
 
     async def stop(self):
         if self._connection:
