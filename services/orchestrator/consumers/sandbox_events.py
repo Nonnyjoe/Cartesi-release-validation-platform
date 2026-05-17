@@ -13,7 +13,8 @@ import aio_pika
 from sqlalchemy import text
 
 from db import AsyncSessionLocal
-from publishers.notifications import publish_notification
+from models.run import RunLog
+from publishers.notifications import publish_notification, publish_live
 
 log = logging.getLogger("orchestrator.consumer.sandbox_events")
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:5672/")
@@ -48,6 +49,69 @@ class SandboxEventConsumer:
             r = row.fetchone()
             return r is not None and r.status == "cancelled"
 
+    async def _store_log_batch(self, run_id: str, lines: list):
+        """
+        Bulk-insert a batch of log lines into orchestrator.run_logs.
+        Each element of `lines` must be a dict with keys:
+          source, level, message, ts (ISO-8601 string)
+        """
+        if not lines:
+            return
+        try:
+            # Build rows, clamping message to 4096 chars
+            rows = [
+                {
+                    "run_id":  run_id,
+                    "source":  str(entry.get("source", "unknown"))[:64],
+                    "level":   str(entry.get("level", "info")),
+                    "message": str(entry.get("message", ""))[:4096],
+                    "ts":      entry.get("ts") or datetime.now(tz=timezone.utc).isoformat(),
+                }
+                for entry in lines
+                if isinstance(entry, dict)
+            ]
+            if not rows:
+                return
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    text("""
+                        INSERT INTO orchestrator.run_logs (run_id, source, level, message, ts)
+                        SELECT
+                            CAST(r->>'run_id'  AS uuid),
+                            r->>'source',
+                            r->>'level',
+                            r->>'message',
+                            CAST(r->>'ts' AS timestamptz)
+                        FROM jsonb_array_elements(CAST(:rows AS jsonb)) AS r
+                    """),
+                    {"rows": json.dumps(rows)},
+                )
+                await db.commit()
+        except Exception as exc:
+            log.warning("Could not store log_batch (%d lines) for run %s: %s",
+                        len(lines), run_id, exc)
+
+    async def _store_run_event(self, run_id: str, event_type: str, payload: dict):
+        """Insert a row into orchestrator.run_events for history/audit."""
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    text("""
+                        INSERT INTO orchestrator.run_events (id, run_id, event_type, payload, ts)
+                        VALUES (:id, :run_id, :event_type, :payload, :ts)
+                    """),
+                    {
+                        "id":         str(uuid.uuid4()),
+                        "run_id":     run_id,
+                        "event_type": event_type,
+                        "payload":    json.dumps(payload),
+                        "ts":         datetime.now(tz=timezone.utc),
+                    },
+                )
+                await db.commit()
+        except Exception as exc:
+            log.warning("Could not store run_event %s for run %s: %s", event_type, run_id, exc)
+
     async def _handle(self, msg: dict):
         event_type = msg.get("event_type")
         run_id     = msg.get("run_id")
@@ -58,13 +122,64 @@ class SandboxEventConsumer:
             log.info("Run %s is cancelled — ignoring sandbox event %s", run_id, event_type)
             return
 
+        # ── log_batch: persist lines to run_logs + broadcast for live viewers ──
+        if event_type == "log_batch":
+            lines = msg.get("lines") or []
+            # Store persistently — this is the core of the new log system.
+            await self._store_log_batch(run_id, lines)
+            # Broadcast to the live dashboard via Redis pub/sub ONLY.
+            # publish_notification() is intentionally avoided here because:
+            #   1. It opens a new RabbitMQ connection per call — unacceptable at
+            #      log_batch frequency (up to dozens per second per sandbox).
+            #   2. It fans out to rvp.notify (Discord etc.) — log lines should
+            #      never trigger Discord notifications.
+            await publish_live({
+                "event_id":   str(uuid.uuid4()),
+                "run_id":     run_id,
+                "sandbox_id": sandbox_id,
+                "service":    "orchestrator",
+                "ts":         datetime.now(tz=timezone.utc).isoformat(),
+                "event_type": "log_batch",
+                "lines":      lines,
+            })
+            return
+
+        if event_type == "step":
+            step   = msg.get("step", "")
+            status = msg.get("step_status", "ok")
+            detail = msg.get("detail") or {}
+
+            # service_log events are the legacy high-frequency per-line events.
+            # Now that we have log_batch + run_logs we still broadcast them for
+            # any WebSocket clients on old code paths, but still skip DB storage
+            # since log_batch handles persistence more efficiently.
+            if step != "service_log":
+                await self._store_run_event(run_id, "sandbox.step", msg)
+
+            await publish_notification(
+                "sandbox.step",
+                step,
+                run_id=run_id,
+                sandbox_id=sandbox_id,
+                step=step,
+                step_status=status,
+                **{k: v for k, v in detail.items() if v is not None},
+            )
+            return
+
         async with AsyncSessionLocal() as db:
-            if event_type == "ready":
+            if event_type == "provisioning":
+                await self._store_run_event(run_id, "sandbox.provisioning", msg)
+                await publish_notification("sandbox.provisioning", "Sandbox provisioning",
+                                           run_id=run_id, sandbox_id=sandbox_id)
+
+            elif event_type == "ready":
                 await db.execute(
                     text("UPDATE orchestrator.runs SET status='running', started_at=:ts WHERE id=:id"),
                     {"ts": datetime.now(tz=timezone.utc), "id": run_id},
                 )
                 await db.commit()
+                await self._store_run_event(run_id, "sandbox.ready", msg)
                 await self._dispatch_tests(run_id, sandbox_id, msg)
                 await publish_notification("sandbox.ready", "Sandbox ready",
                                            run_id=run_id, sandbox_id=sandbox_id)
@@ -75,11 +190,15 @@ class SandboxEventConsumer:
                     {"id": run_id},
                 )
                 await db.commit()
+                await self._store_run_event(run_id, "sandbox.failed", msg)
                 await publish_notification("sandbox.failed", "Sandbox failed",
                                            run_id=run_id, reason=msg.get("failure_reason"))
 
             elif event_type == "closed":
                 log.info("Sandbox %s closed for run %s", sandbox_id, run_id)
+                await self._store_run_event(run_id, "sandbox.closed", msg)
+                await publish_notification("sandbox.closed", "Sandbox closed",
+                                           run_id=run_id, sandbox_id=sandbox_id)
 
     async def _dispatch_tests(self, run_id: str, sandbox_id: str, sandbox_msg: dict):
         """Fetch active test definitions and dispatch a TestCommand for each."""
@@ -91,6 +210,7 @@ class SandboxEventConsumer:
             run_row = await db.execute(
                 text("""
                     SELECT r.suite_ids,
+                           r.app_address,
                            COALESCE(rc.node_major_version, 1) AS node_major_version
                     FROM orchestrator.runs r
                     LEFT JOIN github.release_catalog rc ON rc.tag = r.release_tag
@@ -99,8 +219,12 @@ class SandboxEventConsumer:
                 {"id": run_id},
             )
             run = run_row.fetchone()
-            suite_ids          = run.suite_ids if run else None
+            suite_ids          = run.suite_ids  if run else None
             node_major_version = run.node_major_version if run else 1
+            # app_address is set by sandbox_queue consumer after deploy; also forwarded
+            # from sandbox_msg so we always have the most up-to-date value.
+            app_address = (sandbox_msg.get("app_address")
+                           or (run.app_address if run else None))
 
             all_rows = await db.execute(
                 text("SELECT id, slug, version FROM tests.definitions WHERE is_active = true")
@@ -135,6 +259,7 @@ class SandboxEventConsumer:
                     "docker_network":      sandbox_msg.get("docker_network"),
                     "node_major_version":  node_major_version,
                     "cli_container_name":  sandbox_msg.get("cli_container_name"),
+                    "app_address":         app_address,
                 }).encode()
                 await exchange.publish(
                     mq.Message(body=body, content_type="application/json",

@@ -73,6 +73,7 @@ class SandboxContext:
         docker_network:      str,
         node_major_version:  int = 1,
         cli_container_name:  str | None = None,
+        app_address:         str | None = None,
     ):
         self.sandbox_id          = sandbox_id
         self.run_id              = run_id
@@ -82,6 +83,7 @@ class SandboxContext:
         self.docker_network      = docker_network
         self.node_major_version  = node_major_version
         self.cli_container_name  = cli_container_name  # v2.x: name of the cli-tools container
+        self.app_address         = app_address          # deployed application contract address (if any)
 
     # ── v2.x aliases ──────────────────────────────────────────────────────────
 
@@ -117,6 +119,24 @@ class SandboxContext:
         if self.node_major_version >= 2:
             return f"http://{SANDBOX_HOST}:{self.inspect_port}/inspect"
         return f"http://{SANDBOX_HOST}:{self.node_port}/inspect"
+
+    def app_inspect_url(self, path: str = "") -> str:
+        """
+        v2.x Inspect URL for the deployed application.
+        Path should be the query payload (e.g. "status").
+        If app_address is not set, falls back to /inspect/<path>.
+        """
+        base = f"http://{SANDBOX_HOST}:{self.inspect_port}/inspect"
+        if self.app_address:
+            return f"{base}/{self.app_address}/{path}".rstrip("/")
+        return f"{base}/{path}".rstrip("/")
+
+    def app_jsonrpc_url(self) -> str:
+        """
+        v2.x JSON-RPC base URL.  The RPC endpoint is the same for all apps on
+        the node; callers distinguish apps via the `to` field in the transaction.
+        """
+        return self.jsonrpc_url
 
     @property
     def anvil_rpc_url(self) -> str:

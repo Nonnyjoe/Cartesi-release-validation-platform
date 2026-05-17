@@ -4,6 +4,17 @@ Publishes NotificationMessage to rvp.notify (fanout) and pushes to Redis pub/sub
 
 Uses a module-level singleton Redis client to avoid creating a new connection
 pool on every notification call (which would leak connections under load).
+
+Two public helpers:
+  publish_notification(event_type, title, ...)
+      Full path: RabbitMQ rvp.notify fanout + Redis rvp:live.
+      Use for infrequent milestone events (sandbox ready, step events, etc.)
+      where Discord notification subscribers should also be informed.
+
+  publish_live(payload_dict)
+      Redis-only path.  Use for high-frequency events such as log_batch where
+      subscribers on the rvp.notify fanout (Discord) must NOT be triggered.
+      No new RabbitMQ connection is opened — just a single Redis PUBLISH.
 """
 import json
 import logging
@@ -62,5 +73,22 @@ async def publish_notification(event_type: str, title: str, run_id: str | None =
     except Exception as exc:
         log.error("Redis notification publish failed: %s", exc)
         # Reset client so the next call re-creates it (handles Redis restarts)
+        global _redis_client
+        _redis_client = None
+
+
+async def publish_live(payload: dict) -> None:
+    """
+    Publish an already-assembled payload dict to the Redis live channel only.
+
+    Does NOT open a RabbitMQ connection and does NOT fan out to rvp.notify
+    subscribers (Discord, etc.).  Use this for high-frequency events like
+    log_batch where the per-call overhead of publish_notification is
+    unacceptable and Discord fan-out is actively harmful.
+    """
+    try:
+        await _get_redis().publish(PUBSUB_CHANNEL, json.dumps(payload))
+    except Exception as exc:
+        log.warning("Redis live publish failed: %s", exc)
         global _redis_client
         _redis_client = None

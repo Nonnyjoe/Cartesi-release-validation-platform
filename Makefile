@@ -14,7 +14,7 @@
         logs-ai-agent logs-github-watcher logs-notifier logs-dashboard \
         build-orchestrator build-sandbox-manager build-test-runner \
         build-ai-agent build-github-watcher build-notifier build-dashboard \
-        init-envs seed migrate migrate-sdk migrate-cli migrate-catalogs migrate-contracts migrate-normalize build-test-app lint typecheck test test-unit test-integration \
+        init-envs seed migrate migrate-all migrate-sdk migrate-cli migrate-catalogs migrate-contracts migrate-normalize migrate-apps migrate-logs build-test-app lint typecheck test test-unit test-integration \
         shell-db shell-rabbit clean
 
 COMPOSE  = docker compose
@@ -52,11 +52,14 @@ help:
 	@echo "    make build-test-app   Build Cartesi echo dapp + load snapshot volume"
 	@echo "    make seed             Seed test definitions into the DB"
 	@echo "    make migrate          Run Alembic migrations"
+	@echo "    make migrate-all      Run ALL migrations in order (idempotent)"
 	@echo "    make migrate-sdk      Run migration 0002 (sdk_version) on live DB"
 	@echo "    make migrate-cli      Run migration 0003 (cli_version) on live DB"
 	@echo "    make migrate-catalogs  Run migration 0004 (cli_catalog + sdk_catalog) on live DB"
 	@echo "    make migrate-contracts  Run migration 0005 (contracts_catalog + devnet/contracts cols)"
 	@echo "    make migrate-normalize  Run migration 0006 (BCNF normalization of version chain)"
+	@echo "    make migrate-apps       Run migration 0007 (application registry)"
+	@echo "    make migrate-logs       Run migration 0008 (persistent run logs)"
 	@echo ""
 	@echo "  QUALITY"
 	@echo "    make lint             Ruff lint all Python services"
@@ -255,6 +258,10 @@ migrate:
 	@echo "Running Alembic migrations..."
 	$(COMPOSE) exec orchestrator alembic -c infra/migrations/alembic.ini upgrade head
 
+# migrate-all: run every SQL migration in order (idempotent — safe to re-run)
+migrate-all: migrate migrate-sdk migrate-cli migrate-catalogs migrate-contracts migrate-normalize migrate-apps migrate-logs
+	@echo "All migrations applied."
+
 migrate-sdk:
 	@echo "Running migration 0002 (sdk_version + node_major_version)..."
 	$(COMPOSE) exec postgres psql -U rvp rvp \
@@ -283,6 +290,18 @@ migrate-normalize:
 	@echo "Running migration 0006 (BCNF normalization of version chain)..."
 	$(COMPOSE) exec postgres psql -U rvp rvp \
 	  -f /dev/stdin < infra/postgres/migrations/0006_normalize_version_chain.sql
+	@echo "Done."
+
+migrate-apps:
+	@echo "Running migration 0007 (application registry)..."
+	$(COMPOSE) exec postgres psql -U rvp rvp \
+	  -f /dev/stdin < infra/postgres/migrations/0007_applications.sql
+	@echo "Done."
+
+migrate-logs:
+	@echo "Running migration 0008 (persistent run logs)..."
+	$(COMPOSE) exec postgres psql -U rvp rvp \
+	  -f /dev/stdin < infra/postgres/migrations/0008_run_logs.sql
 	@echo "Done."
 
 # ── Shells ────────────────────────────────────────────────────────────────────

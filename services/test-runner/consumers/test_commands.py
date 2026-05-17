@@ -2,12 +2,13 @@
 services/test-runner/consumers/test_commands.py
 Consumes tests.commands queue.
 For each command: checks for cancellation, runs the test, writes result to DB,
-publishes to tests.results.
+publishes to tests.results, and emits a log_batch event with executor diagnostics.
 """
 import asyncio
 import json
 import logging
 import os
+import traceback
 import uuid
 from datetime import datetime, timezone
 
@@ -69,6 +70,7 @@ class TestCommandConsumer:
     async def _handle(self, msg: dict):
         run_id             = msg["run_id"]
         sandbox_id         = msg["sandbox_id"]
+        app_address        = msg.get("app_address")
         definition_id      = msg["definition_id"]
         definition_version = msg["definition_version"]
         definition_slug    = msg["definition_slug"]
@@ -123,6 +125,7 @@ class TestCommandConsumer:
             docker_network=docker_network,
             node_major_version=node_major_version,
             cli_container_name=cli_container_name,
+            app_address=app_address,
         )
 
         # Insert a running result row
@@ -141,9 +144,72 @@ class TestCommandConsumer:
             )
             await db.commit()
 
-        # Run the test
-        outcome      = await run_test(definition, ctx)
+        # Run the test — capture any diagnostic log lines alongside the outcome
+        test_log_lines: list[dict] = []
+        error_tb: str | None = None
+
+        # Header line so logs tab shows a clear boundary per test
+        test_log_lines.append({
+            "source":  f"test:{definition_id[:8]}",
+            "level":   "info",
+            "message": f"[{definition_slug}] Starting test (run={run_id[:8]}, sandbox={sandbox_id[:8]})",
+            "ts":      started_at.isoformat(),
+        })
+
+        try:
+            outcome = await run_test(definition, ctx)
+        except Exception as exc:
+            # Unhandled executor exception — build a synthetic outcome and capture
+            # the full traceback so it's visible in the logs tab.
+            error_tb = traceback.format_exc()
+            completed_at = datetime.now(tz=timezone.utc)
+            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            outcome = {
+                "status":            "error",
+                "duration_ms":       duration_ms,
+                "assertion_results": [],
+                "error_message":     str(exc)[:500],
+            }
+            for tb_line in error_tb.splitlines():
+                test_log_lines.append({
+                    "source":  f"test:{definition_id[:8]}",
+                    "level":   "error",
+                    "message": tb_line,
+                    "ts":      completed_at.isoformat(),
+                })
+
         completed_at = datetime.now(tz=timezone.utc)
+
+        # Emit per-assertion results as log lines so they're visible even for failures
+        for ar in outcome.get("assertion_results", []):
+            status_str = "✓" if ar.get("passed") else "✗"
+            detail     = ar.get("detail") or ""
+            test_log_lines.append({
+                "source":  f"test:{definition_id[:8]}",
+                "level":   "info" if ar.get("passed") else "error",
+                "message": f"  {status_str} [{ar.get('assertion_type', '?')}] {detail}",
+                "ts":      completed_at.isoformat(),
+            })
+
+        # Error message as a log line
+        if outcome.get("error_message") and not error_tb:
+            test_log_lines.append({
+                "source":  f"test:{definition_id[:8]}",
+                "level":   "error",
+                "message": f"  error: {outcome['error_message']}",
+                "ts":      completed_at.isoformat(),
+            })
+
+        # Summary footer
+        test_log_lines.append({
+            "source":  f"test:{definition_id[:8]}",
+            "level":   "info" if outcome["status"] == "passed" else "warn",
+            "message": (
+                f"[{definition_slug}] {outcome['status'].upper()} "
+                f"({outcome['duration_ms']}ms)"
+            ),
+            "ts":      completed_at.isoformat(),
+        })
 
         # Write result to DB
         async with SessionLocal() as db:
@@ -167,7 +233,39 @@ class TestCommandConsumer:
             )
             await db.commit()
 
+        # Publish log batch for this test so the orchestrator can persist it
+        await self._publish_log_batch(msg, test_log_lines)
+
         await self._publish_result(msg, outcome, result_id, started_at, completed_at)
+
+    async def _publish_log_batch(self, cmd: dict, lines: list[dict]):
+        """
+        Publish a log_batch event to sandbox.events so the orchestrator consumer
+        can bulk-insert the lines into orchestrator.run_logs.
+        """
+        if not lines:
+            return
+        payload = json.dumps({
+            "event_id":   str(uuid.uuid4()),
+            "run_id":     cmd["run_id"],
+            "sandbox_id": cmd["sandbox_id"],
+            "service":    "test-runner",
+            "ts":         datetime.now(tz=timezone.utc).isoformat(),
+            "event_type": "log_batch",
+            "lines":      lines,
+        }).encode()
+        try:
+            exchange = await self._channel.get_exchange("rvp.sandbox")
+            await exchange.publish(
+                aio_pika.Message(
+                    body=payload,
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key="sandbox.events",
+            )
+        except Exception as exc:
+            log.warning("Could not publish log_batch for run %s: %s", cmd["run_id"], exc)
 
     async def _publish_result(self, cmd: dict, outcome: dict, result_id: str,
                                started_at: datetime, completed_at: datetime):

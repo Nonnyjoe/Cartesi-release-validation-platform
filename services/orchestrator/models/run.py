@@ -1,12 +1,12 @@
 """
 services/orchestrator/models/run.py
-ORM model for orchestrator.runs and orchestrator.run_events.
+ORM models for orchestrator.runs, orchestrator.run_events, and orchestrator.run_logs.
 """
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Integer, SmallInteger, Numeric, ARRAY,
+    BigInteger, Column, String, Integer, SmallInteger, Numeric, ARRAY,
     TIMESTAMP, Boolean, Enum as SAEnum, ForeignKey, text,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -37,6 +37,9 @@ class Run(Base):
     pass_rate         = Column(Numeric(5, 2))
     report            = Column(JSONB)
     metadata_         = Column("metadata", JSONB, default=dict)
+    # Application registry — populated when a run is triggered with an app_id
+    app_id            = Column(UUID(as_uuid=True), ForeignKey("tests.applications.id", use_alter=True), nullable=True)
+    app_address       = Column(String, nullable=True)  # Ethereum address of deployed app contract
 
     events = relationship("RunEvent", back_populates="run", cascade="all, delete-orphan")
 
@@ -52,3 +55,23 @@ class RunEvent(Base):
     ts         = Column(TIMESTAMP(timezone=True), default=_now)
 
     run = relationship("Run", back_populates="events", foreign_keys=[run_id])
+
+
+class RunLog(Base):
+    """
+    Persistent log lines for a run.  Written by the orchestrator consumer when
+    it receives log_batch events from the sandbox-manager or test-runner.
+
+    The BIGSERIAL primary key serves as the ordering cursor; keyset pagination
+    on (run_id, id) is efficient and correct under concurrent inserts.
+    """
+    __tablename__ = "run_logs"
+    __table_args__ = {"schema": "orchestrator"}
+
+    id      = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id  = Column(UUID(as_uuid=True), ForeignKey("orchestrator.runs.id", ondelete="CASCADE"),
+                     nullable=False, index=False)   # covered by the composite index
+    source  = Column(String, nullable=False)         # "advancer", "anvil", "build", "test:uuid", …
+    level   = Column(String, nullable=False, default="info")
+    message = Column(String, nullable=False)
+    ts      = Column(TIMESTAMP(timezone=True), default=_now)
