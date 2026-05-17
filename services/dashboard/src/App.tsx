@@ -7,13 +7,16 @@ import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
 import Releases from './pages/Releases'
 import Tests from './pages/Tests'
+import TestDetail from './pages/TestDetail'
 import Sandboxes from './pages/Sandboxes'
 import Sessions from './pages/Sessions'
 import Session from './pages/Session'
 import AISuggestions from './pages/AISuggestions'
+import Apps from './pages/Apps'
 
 const NAV = [
   { to: '/runs',        label: '⚡ Runs' },
+  { to: '/apps',        label: '🗂 Applications' },
   { to: '/releases',    label: '🏷 Releases' },
   { to: '/tests',       label: '🧪 Tests' },
   { to: '/sandboxes',   label: '📦 Sandboxes' },
@@ -91,8 +94,10 @@ export default function App() {
               <Route path="/" element={<Navigate to="/runs" replace />} />
               <Route path="/runs" element={<Runs />} />
               <Route path="/runs/:runId" element={<RunDetail />} />
+              <Route path="/apps" element={<Apps />} />
               <Route path="/releases" element={<Releases />} />
               <Route path="/tests" element={<Tests />} />
+              <Route path="/tests/:testId" element={<TestDetail />} />
               <Route path="/sandboxes" element={<Sandboxes />} />
               <Route path="/sessions" element={<Sessions />} />
               <Route path="/sessions/:sessionId" element={<Session />} />

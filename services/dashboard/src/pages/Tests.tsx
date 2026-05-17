@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { testsApi } from '../api'
 import type { TestDefinition } from '../types'
 
@@ -73,6 +74,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
 }
 
 export default function Tests() {
+  const navigate = useNavigate()
   const [defs, setDefs]         = useState<TestDefinition[]>([])
   const [loading, setLoading]   = useState(true)
   const [showCreate, setCreate] = useState(false)
@@ -145,7 +147,15 @@ export default function Tests() {
             ) : visible.length === 0 ? (
               <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 text-sm">No definitions found</td></tr>
             ) : visible.map(def => (
-              <tr key={def.id} className="hover:bg-white/5 transition-colors">
+              <tr
+                key={def.id}
+                className="hover:bg-white/5 transition-colors cursor-pointer"
+                onClick={e => {
+                  // don't navigate when the toggle button is clicked
+                  if ((e.target as HTMLElement).closest('button')) return
+                  navigate(`/tests/${def.id}`)
+                }}
+              >
                 <td className="px-4 py-3">
                   <span className="text-gray-200 font-medium">{def.name}</span>
                 </td>

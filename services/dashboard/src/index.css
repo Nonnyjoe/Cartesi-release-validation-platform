@@ -17,4 +17,27 @@
   .btn-ghost { @apply btn bg-transparent hover:bg-rvp-surface text-gray-300 hover:text-white border border-rvp-border; }
   .card { @apply bg-rvp-surface border border-rvp-border rounded-lg; }
   .input { @apply bg-rvp-bg border border-rvp-border rounded-md px-3 py-1.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-rvp-primary; }
+
+  /* Rendered markdown body */
+  .md-prose { font-size: 0.9rem; line-height: 1.7; color: #d1d5db; }
+  .md-prose h1, .md-prose h2, .md-prose h3, .md-prose h4 { color: #f3f4f6; font-weight: 600; margin-top: 1.4em; margin-bottom: 0.5em; }
+  .md-prose h1 { font-size: 1.3rem; }
+  .md-prose h2 { font-size: 1.1rem; padding-bottom: 0.3em; border-bottom: 1px solid #2a2d3a; }
+  .md-prose h3 { font-size: 1rem; }
+  .md-prose h4 { font-size: 0.9rem; }
+  .md-prose p  { margin: 0.65em 0; }
+  .md-prose ul, .md-prose ol { margin: 0.65em 0; padding-left: 1.4em; }
+  .md-prose li { margin: 0.25em 0; }
+  .md-prose strong { color: #f3f4f6; font-weight: 600; }
+  .md-prose em    { color: #e5e7eb; }
+  .md-prose code  { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.82em; padding: 0.1em 0.35em; background: rgba(99,102,241,0.12); color: #a5b4fc; border-radius: 4px; }
+  .md-prose pre   { margin: 0.9em 0; padding: 1em; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; overflow-x: auto; }
+  .md-prose pre code { background: none; padding: 0; color: #d1d5db; font-size: 0.82rem; }
+  .md-prose blockquote { margin: 0.9em 0; padding: 0.5em 1em; border-left: 3px solid #6366f1; background: rgba(99,102,241,0.08); border-radius: 0 4px 4px 0; color: #9ca3af; }
+  .md-prose a  { color: #818cf8; text-decoration: underline; }
+  .md-prose a:hover { color: #a5b4fc; }
+  .md-prose hr { margin: 1.2em 0; border-color: #2a2d3a; }
+  .md-prose table { width: 100%; border-collapse: collapse; margin: 0.9em 0; font-size: 0.85rem; }
+  .md-prose th, .md-prose td { padding: 0.45em 0.75em; border: 1px solid #2a2d3a; text-align: left; }
+  .md-prose th { background: rgba(99,102,241,0.1); color: #f3f4f6; font-weight: 600; }
 }

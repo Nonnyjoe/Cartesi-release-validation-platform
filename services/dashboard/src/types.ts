@@ -21,6 +21,20 @@ export interface Run {
   started_at?:       string
   completed_at?:     string
   pass_rate?:        number
+  app_id?:           string
+  app_address?:      string
+}
+
+/** Registered Cartesi application (tests.applications) */
+export interface Application {
+  id:           string
+  name:         string
+  github_url:   string
+  description?: string
+  is_active:    boolean
+  added_by?:    string
+  added_at:     string
+  updated_at:   string
 }
 
 /** One assertion result as stored in tests.results.assertion_results */
@@ -62,16 +76,18 @@ export interface RunReport {
 
 /** Matches tests.definitions row */
 export interface TestDefinition {
-  id:         string
-  slug:       string
-  name:       string
-  version:    number
-  priority:   string
-  component?: string
-  is_active:  boolean
-  tags:       string[]
-  created_at: string
-  updated_at: string
+  id:              string
+  slug:            string
+  name:            string
+  version:         number
+  priority:        string
+  component?:      string
+  is_active:       boolean
+  tags:            string[]
+  timeout_seconds: number
+  definition_raw:  string
+  created_at:      string
+  updated_at:      string
 }
 
 /** Matches sandbox.sandboxes row */
@@ -197,9 +213,48 @@ export interface SdkRelease {
   contracts_tag?:   string   // contracts version paired with this SDK
 }
 
+// ─── Run logs (orchestrator.run_logs) ────────────────────────────────────────
+
+/** One row from orchestrator.run_logs */
+export interface RunLogLine {
+  id:      number
+  source:  string
+  level:   'info' | 'warn' | 'error' | 'debug' | string
+  message: string
+  ts:      string
+}
+
+// ─── Run events (orchestrator.run_events) ────────────────────────────────────
+
+/** Provisioning step names emitted by sandbox-manager */
+export type SandboxStep =
+  | 'network_created'
+  | 'anvil_started'
+  | 'anvil_health_check'
+  | 'anvil_healthy'
+  | 'contracts_deploying'
+  | 'deployer_image_building'
+  | 'deployer_image_ready'
+  | 'contracts_deployed'
+  | 'contracts_fallback'
+  | 'contracts_skipped'
+  | 'node_starting'
+  | 'node_started'
+
+export type StepStatus = 'ok' | 'info' | 'warn' | 'failed'
+
+export interface RunEvent {
+  id:         string
+  run_id:     string
+  event_type: string   // e.g. 'sandbox.step', 'sandbox.ready', 'run.queued'
+  payload:    Record<string, unknown>
+  ts:         string
+}
+
 // ─── WebSocket event types ────────────────────────────────────────────────────
 export type WSEventType =
   | 'sandbox.provisioning' | 'sandbox.ready' | 'sandbox.failed' | 'sandbox.closed'
+  | 'sandbox.step'
   | 'test.started' | 'test.completed' | 'test.failed'
   | 'run.queued' | 'run.started' | 'run.completed' | 'run.failed' | 'run.cancelled'
   | 'ai.token' | 'ai.tool_call' | 'ai.tool_result' | 'ai.finding' | 'ai.completed'
@@ -210,6 +265,7 @@ export interface WSEvent {
   session_id?: string
   ts:          string
   payload:     Record<string, unknown>
+  fields?:     Record<string, unknown>
   [key: string]: unknown
 }
 

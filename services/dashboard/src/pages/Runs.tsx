@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { runsApi, releasesApi } from '../api'
+import { runsApi, releasesApi, appsApi } from '../api'
 import { StatusBadge } from '../components/StatusBadge'
-import type { Run, RunStatus, ReleaseEntry } from '../types'
+import type { Run, RunStatus, ReleaseEntry, Application } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { format } from 'date-fns'
 
@@ -11,20 +11,28 @@ const PAGE_SIZE = 20
 
 
 function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (r: Run) => void }) {
-  const [catalog, setCatalog] = useState<ReleaseEntry[]>([])
-  const [selectedTag, setSelectedTag] = useState('')
+  const [catalog,         setCatalog]         = useState<ReleaseEntry[]>([])
+  const [apps,            setApps]            = useState<Application[]>([])
+  const [selectedTag,     setSelectedTag]     = useState('')
+  const [selectedAppId,   setSelectedAppId]   = useState('')    // '' = no app (raw node tests)
   const [triggeredByUser, setTriggeredByUser] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [loading,         setLoading]         = useState(false)
+  const [error,           setError]           = useState('')
 
   useEffect(() => {
     releasesApi.list().then(entries => {
       setCatalog(entries)
       if (entries.length > 0) setSelectedTag(entries[0].tag)
     }).catch(console.error)
+
+    appsApi.list().then(setApps).catch(console.error)
   }, [])
 
-  const selected = catalog.find(e => e.tag === selectedTag) ?? null
+  const selected    = catalog.find(e => e.tag === selectedTag) ?? null
+  const selectedApp = apps.find(a => a.id === selectedAppId) ?? null
+
+  // Only v2.x releases (node_major_version >= 2) can run with an application
+  const isV2 = (selected?.node_major_version ?? 1) >= 2
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -37,6 +45,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
         priority:          5,
         triggered_by:      'user',
         triggered_by_user: triggeredByUser.trim() || undefined,
+        app_id:            (isV2 && selectedAppId) ? selectedAppId : undefined,
       })
       onCreated(run)
       onClose()
@@ -58,7 +67,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <select
                 className="input w-full"
                 value={selectedTag}
-                onChange={e => setSelectedTag(e.target.value)}
+                onChange={e => { setSelectedTag(e.target.value); setSelectedAppId('') }}
               >
                 {catalog.map(entry => (
                   <option key={entry.tag} value={entry.tag}>
@@ -71,6 +80,36 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
                 {selected.image_tag}
               </div>
+            )}
+          </div>
+
+          {/* Application selector (v2.x only) */}
+          <div>
+            <label className="text-xs text-gray-400 block mb-1">
+              Application
+              {!isV2 && <span className="text-gray-600 ml-1">(v2.x node required)</span>}
+            </label>
+            <select
+              className="input w-full"
+              value={selectedAppId}
+              onChange={e => setSelectedAppId(e.target.value)}
+              disabled={!isV2}
+            >
+              <option value="">— None (raw node tests only) —</option>
+              {apps.filter(a => a.is_active).map(app => (
+                <option key={app.id} value={app.id}>{app.name}</option>
+              ))}
+            </select>
+            {selectedApp && (
+              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
+                {selectedApp.github_url}
+              </div>
+            )}
+            {isV2 && !selectedAppId && (
+              <p className="text-xs text-yellow-600 mt-1">
+                Without an application the node starts without a machine snapshot. Health-check
+                tests pass; input/inspect tests will not.
+              </p>
             )}
           </div>
 

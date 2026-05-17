@@ -1,7 +1,8 @@
 import type {
-  Run, RunReport, TestDefinition, Sandbox,
+  Run, RunReport, RunEvent, RunLogLine, TestDefinition, Sandbox,
   AISession, SuggestedAction, PaginatedResponse, QueueDepths,
   ReleaseEntry, CliRelease, SdkRelease, ContractsRelease,
+  Application,
 } from './types'
 
 const BASE = '/api'
@@ -28,11 +29,12 @@ export const runsApi = {
   },
   get: (runId: string) => request<Run>(`/runs/${runId}`),
   create: (payload: {
-    release_tag:       string
-    image_tag:         string
-    priority?:         number
-    triggered_by?:     string
+    release_tag:        string
+    image_tag:          string
+    priority?:          number
+    triggered_by?:      string
     triggered_by_user?: string
+    app_id?:            string
   }) =>
     request<Run>('/runs', {
       method: 'POST',
@@ -46,6 +48,25 @@ export const runsApi = {
     request<{ status: string; run_id: string }>(`/runs/${runId}/cancel`, { method: 'POST' }),
   /** Fetch full report with test results for a run. */
   report: (runId: string) => request<RunReport>(`/reports/${runId}`),
+  /** Fetch stored run events (provisioning steps + lifecycle) in chronological order. */
+  events: (runId: string) => request<RunEvent[]>(`/runs/${runId}/events`),
+  /** Fetch persisted log lines for a run (cursor-paginated). */
+  logs: (runId: string, opts?: { source?: string; level?: string; afterId?: number; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (opts?.source)  q.set('source',   opts.source)
+    if (opts?.level)   q.set('level',    opts.level)
+    if (opts?.afterId !== undefined) q.set('after_id', String(opts.afterId))
+    if (opts?.limit)   q.set('limit',    String(opts.limit))
+    const qs = q.toString()
+    return request<{ lines: RunLogLine[]; next_cursor: number | null }>(
+      `/runs/${runId}/logs${qs ? `?${qs}` : ''}`
+    )
+  },
+  /** Plain-text log download URL (used as href, not fetched by JS). */
+  logsDownloadUrl: (runId: string, source?: string): string => {
+    const q = source ? `?source=${encodeURIComponent(source)}` : ''
+    return `/api/runs/${runId}/logs/download${q}`
+  },
 }
 
 // ─── Test definitions ─────────────────────────────────────────────────────────
@@ -134,4 +155,19 @@ export const contractsReleasesApi = {
 // ─── Queues ───────────────────────────────────────────────────────────────────
 export const queuesApi = {
   depths: () => request<QueueDepths>('/queues'),
+}
+
+// ─── Applications ─────────────────────────────────────────────────────────────
+export const appsApi = {
+  list: (includeInactive = false) =>
+    request<Application[]>(`/apps${includeInactive ? '?include_inactive=true' : ''}`),
+  get: (id: string) => request<Application>(`/apps/${id}`),
+  create: (payload: { name: string; github_url: string; description?: string; added_by?: string }) =>
+    request<Application>('/apps', { method: 'POST', body: JSON.stringify(payload) }),
+  update: (id: string, payload: { name?: string; github_url?: string; description?: string; is_active?: boolean }) =>
+    request<Application>(`/apps/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  remove: (id: string) =>
+    fetch(`/api/apps/${id}`, { method: 'DELETE' }).then(r => {
+      if (!r.ok && r.status !== 204) throw new Error(`${r.status}`)
+    }),
 }
