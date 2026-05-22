@@ -182,7 +182,11 @@ async def list_runs(
 
 @router.get("/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
-    run = await db.get(Run, uuid.UUID(run_id))
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid run_id")
+    run = await db.get(Run, rid)
     if not run:
         raise HTTPException(404, detail=f"Run {run_id} not found")
     return run
@@ -305,6 +309,24 @@ async def get_run_logs(
     return {"lines": lines, "next_cursor": next_cursor}
 
 
+@router.get("/{run_id}/logs/sources")
+async def get_run_log_sources(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the distinct log sources recorded for a run (fast single-query lookup)."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid run_id")
+
+    result = await db.execute(
+        text("SELECT DISTINCT source FROM orchestrator.run_logs WHERE run_id = :rid ORDER BY source"),
+        {"rid": rid},
+    )
+    return {"sources": [row.source for row in result.fetchall()]}
+
+
 @router.get("/{run_id}/logs/download")
 async def download_run_logs(
     run_id: str,
@@ -356,7 +378,11 @@ async def download_run_logs(
 
 @router.post("/{run_id}/cancel")
 async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db)):
-    run = await db.get(Run, uuid.UUID(run_id))
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid run_id")
+    run = await db.get(Run, rid)
     if not run:
         raise HTTPException(404, detail=f"Run {run_id} not found")
     if run.status in ("completed", "failed", "cancelled"):

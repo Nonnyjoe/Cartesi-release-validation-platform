@@ -11,7 +11,7 @@ import yaml
 
 log = logging.getLogger("test-runner.interpreter")
 
-FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 
 
 def parse_definition(raw: str) -> dict[str, Any]:
