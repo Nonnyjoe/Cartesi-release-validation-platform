@@ -49,9 +49,25 @@ async def lifespan(app: FastAPI):
         return_exceptions=True,
     )
 
-    sandbox_task  = asyncio.create_task(sandbox_consumer.run())
-    result_task   = asyncio.create_task(result_consumer.run())
-    releases_task = asyncio.create_task(releases_consumer.run())
+    async def _run_consumer(consumer, name: str):
+        """Run a consumer indefinitely, restarting on crash. Never swallows CancelledError."""
+        while True:
+            try:
+                await consumer.run()
+                log.warning("Consumer %s exited normally — restarting", name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("Consumer %s crashed (%s) — restarting in 5 s", name, exc)
+            await asyncio.sleep(5)
+            try:
+                await consumer.start()
+            except Exception as exc:
+                log.error("Consumer %s reconnect failed (%s) — will retry", name, exc)
+
+    sandbox_task  = asyncio.create_task(_run_consumer(sandbox_consumer,  "sandbox_events"))
+    result_task   = asyncio.create_task(_run_consumer(result_consumer,   "test_results"))
+    releases_task = asyncio.create_task(_run_consumer(releases_consumer, "releases"))
     # Start WebSocket Redis relay here (not via deprecated @on_event("startup"))
     ws_redis_task = asyncio.create_task(redis_subscriber())
 
