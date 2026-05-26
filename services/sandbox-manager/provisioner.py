@@ -46,6 +46,7 @@ processing real inputs, but the API services will still come up,
 allowing health-check tests to pass.
 """
 import asyncio
+import hashlib
 import logging
 import os
 import re

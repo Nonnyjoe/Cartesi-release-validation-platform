@@ -105,10 +105,16 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true)
+    // Fetch all distinct sources up-front so the sidebar is complete immediately,
+    // regardless of how many lines are loaded (Anvil's startup output otherwise
+    // dominates the first page and hides all other sources).
+    runsApi.logSources(runId).then(res => {
+      setSources(new Set(res.sources))
+    }).catch(console.error)
+
     runsApi.logs(runId, { limit: 200 }).then(res => {
       setLines(res.lines)
       setNextCursor(res.next_cursor)
-      // Build source list from initial batch
       setSources(prev => {
         const next = new Set(prev)
         res.lines.forEach(l => next.add(l.source))

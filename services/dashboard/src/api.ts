@@ -62,6 +62,9 @@ export const runsApi = {
       `/runs/${runId}/logs${qs ? `?${qs}` : ''}`
     )
   },
+  /** Return all distinct log source labels for a run (fast single-query call). */
+  logSources: (runId: string) =>
+    request<{ sources: string[] }>(`/runs/${runId}/logs/sources`),
   /** Plain-text log download URL (used as href, not fetched by JS). */
   logsDownloadUrl: (runId: string, source?: string): string => {
     const q = source ? `?source=${encodeURIComponent(source)}` : ''
