@@ -417,50 +417,72 @@ POST /runs
 ### Phase 1 — Foundation ✅
 
 - [x] Full repo scaffold — all folders and placeholder files
-- [x] `docker-compose.yml` — all 10 services, networks, healthchecks
-- [x] `infra/postgres/init.sql` — 6 schemas, 6 roles, 11 tables, indexes
-- [x] `infra/rabbitmq/definitions.json` — 6 exchanges, 12 queues, all bindings
+- [x] `docker-compose.yml` — all services, networks, healthchecks
+- [x] `infra/postgres/init.sql` — schemas, roles, tables, indexes
+- [x] `infra/rabbitmq/definitions.json` — exchanges, queues, bindings pre-declared on boot
 - [x] `shared/message_schemas/` — Pydantic models for all MQ messages
 - [x] `shared/constants.py` — all queue/exchange names and status enums
 
-### Phase 2 — Test Execution ✅
+### Phase 2 — Core Test Execution Pipeline ✅
 
-- [x] `sandbox-base/Dockerfile` — Ubuntu 22 + Anvil + Cartesi CLI
+- [x] `sandbox-base/Dockerfile` — base image with Anvil + Cartesi CLI + Python deps
 - [x] Orchestrator — FastAPI app, async SQLAlchemy, `/runs` + `/sandboxes` + `/reports` routes, WebSocket relay
-- [x] Sandbox Manager — Docker SDK provisioner, pool tracker, priority queue consumer
+- [x] Sandbox Manager — Docker SDK provisioner, pool tracker (`MAX_SANDBOXES`), priority queue consumer
 - [x] Test Runner — YAML+MD parser, hot-reload loader, 5 assertion executors, RabbitMQ consumer/publisher
-- [x] 5 seed test definitions (advance-state, inspect, GraphQL, epoch-close, voucher)
+- [x] 6 seed test definitions (advance-state, inspect, GraphQL, epoch-close, voucher, cast-fix)
 - [x] Full run flow: trigger → sandbox → tests → results → report → teardown
+- [x] Orchestrator consumer auto-restart loop — consumers recover from RabbitMQ connection drops without service restart
 
-### Phase 3 — AI Agent 🔜
+### Phase 3 — v2.x Node Support ✅
 
-- [ ] Context assembler — inject Cartesi docs into Claude system prompt
+- [x] **Cannon deployer** — dedicated image that deploys `rollups-contracts` via `cannon build` + `cannon inspect --write-deployments`; runs in Anvil's network namespace (`network_mode=container:<id>`) so `localhost:8545` is always reachable
+- [x] **v2.x sandbox provisioning** — 6-service stack (evm-reader, advancer, validator, claimer, jsonrpc-api, separate Postgres DB) replacing the single v1.x node container
+- [x] **Application build pipeline** — clones app repo, runs `cartesi build`, stores machine snapshot in a Docker volume; build-cache layer skips re-building when the commit SHA matches
+- [x] **Application deploy pipeline** — reads machine hash from snapshot, calls `SelfHostedApplicationFactory.deployContracts()` and `calculateAddresses()` via `cast` (v2.2.0 ABI), registers the deployed address
+- [x] **evm-reader sync** — polls Anvil for 2 confirmation blocks after deploy then a grace window so the evm-reader pipeline processes `ApplicationCreated` before tests run
+- [x] **Application Registry** — `tests.applications` table + full CRUD API (`GET`/`POST`/`PATCH /apps`) so users register the Cartesi app under test; `app_id` passed when triggering a run wires the full build-deploy flow
+- [x] Version-chain normalization (BCNF) — `release_catalog → cli_catalog → sdk_catalog → devnet_catalog → contracts_catalog`
+- [x] `shared/sdk_resolver.py` — resolves SDK/CLI/contracts version from a release tag at runtime
+
+### Phase 4 — Release Tracking & GitHub Integration ✅
+
+- [x] **GitHub Watcher** — polls the Cartesi rollups-node GitHub repo for new releases on a configurable interval; resolves the full toolchain version chain (CLI → SDK → devnet → contracts) and upserts into the release catalog
+- [x] **Webhook handler** — validates HMAC-SHA256 signatures, processes `release` and `push` events for instant catalog updates without waiting for the next poll cycle
+- [x] **Release catalog API** — `GET /releases` with toolchain fields (`cli_tag`, `sdk_tag`, `contracts_version`, `image_tag`, `node_major_version`) consumed by the dashboard and sandbox provisioner
+- [x] **Auto-trigger** — new releases enqueue a sandbox run at priority 9 (above user-triggered at 5)
+- [x] **Discord Notifier** — sends formatted embeds on new releases and run completions via webhooks
+
+### Phase 5 — Dashboard ✅
+
+- [x] **Runs list** — paginated table with status badges, pass-rate bars, and one-click run trigger
+- [x] **Run detail page** — tabbed view: Tests, Setup Log, Logs
+- [x] **Setup Log tab** — live provisioning step timeline (`SandboxSetupPanel`) showing each provisioning milestone with timestamps and expandable detail chips; fed by WebSocket `sandbox.step` events in real-time and hydrated from `run_events` on page load
+- [x] **Logs tab** (`LogViewer`) — full persistent log viewer: source sidebar with per-source colour toggles, level filter (all / warn+ / error only), client-side search, auto-scroll with pause-on-scroll-up, cursor-paginated Load More, and plain-text download
+- [x] **Persistent log storage** — `orchestrator.run_logs` table (BIGSERIAL PK for cursor pagination); all container stdout/stderr (Anvil, evm-reader, advancer, etc.) and build/deploy output bulk-inserted via single `INSERT … SELECT FROM jsonb_array_elements` per batch; logs survive container teardown and page refresh
+- [x] **LogBatchBuffer** — thread-safe 50-line / 2-second batching layer between container log streams and RabbitMQ, keeping message volume proportional to log output rather than one message per line
+- [x] **Apps page** — browse and register Cartesi applications linked to runs
+- [x] **TestDetail page** — full test definition view with assertion breakdown
+- [x] **Live WebSocket relay** — Redis pub/sub → browser; channel-aware routing so each run detail page only receives events for its run; `log_batch` events delivered via `publish_live()` (Redis-only, no RabbitMQ fanout)
+- [x] **Tests page** — lists all active test definitions with metadata
+- [x] **Sandbox pool status** — live counter of active sandboxes and queue depth
+
+### Phase 6 — AI Agent 🔜
+
+- [ ] Context assembler — inject Cartesi docs + run history into Claude system prompt
 - [ ] Agent loop — Claude tool-use agentic loop (observe → reason → act)
-- [ ] 10 agent tools (blockchain, node, graphql, payload gen, time, reporting)
+- [ ] 10 agent tools (blockchain, node, graphql, payload generation, reporting)
 - [ ] 3 session modes: autonomous, collaborative, interactive
 - [ ] Session streaming to dashboard WebSocket
+- [ ] AI session UI — chat interface + live tool call stream in the dashboard
+- [ ] Auto-PR: agent opens a GitHub PR with new test definitions when coverage gaps are found
 
-### Phase 4 — Dashboard 🔜
+### Phase 7 — Future
 
-- [ ] Runs list + run detail page (React + TypeScript + Tailwind)
-- [ ] Live log stream via WebSocket
-- [ ] Sandbox pool status view
-- [ ] AI session UI — chat interface + live tool call stream
-- [ ] Test definition editor (upload MD, preview, validate, save to DB)
-
-### Phase 5 — GitHub + Discord 🔜
-
-- [ ] GitHub Watcher — polling + webhook handler for new releases
-- [ ] Auto-trigger run on new release (priority 9)
-- [ ] Notifier — Discord embeds for run reports and release alerts
-
-### Phase 6 — Future
-
-- [ ] Adversarial / chaos mode (agent tries to break the node)
+- [ ] Adversarial / chaos mode (agent actively tries to break the node)
+- [ ] Test definition editor in dashboard (upload MD, preview, validate, save to DB)
 - [ ] Discord bot for interactive agent conversations
 - [ ] Local model integration (Ollama) for cheap formatting tasks
 - [ ] RAG pipeline for smaller-context local models
-- [ ] Auto-PR: agent opens GitHub PR with new test definitions when gaps are found
 
 ---
 
@@ -510,6 +532,20 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxxx/yyyy
 | Context injection | Direct assembler into system prompt  | Simple, zero extra infrastructure             |
 | Live streaming    | Claude streaming API → WebSocket     | Users see agent reasoning in real time        |
 | Redis role        | Pub/sub only (dashboard broadcast)   | Not inter-service messaging — that's RabbitMQ |
+
+---
+
+## Running Locally — Step-by-Step
+
+For a full walkthrough of setting up the platform, triggering your first test run, and verifying each service from scratch, see:
+
+**[run_local.md](./run_local.md)**
+
+---
+
+## Architecture Diagram
+
+![Cartesi RVP Architecture](./architechtural_diagram.png)
 
 ---
 
