@@ -14,7 +14,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [catalog,         setCatalog]         = useState<ReleaseEntry[]>([])
   const [apps,            setApps]            = useState<Application[]>([])
   const [selectedTag,     setSelectedTag]     = useState('')
-  const [selectedAppId,   setSelectedAppId]   = useState('')    // '' = no app (raw node tests)
+  const [selectedAppId,   setSelectedAppId]   = useState('')
   const [triggeredByUser, setTriggeredByUser] = useState('')
   const [loading,         setLoading]         = useState(false)
   const [error,           setError]           = useState('')
@@ -25,7 +25,11 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
       if (entries.length > 0) setSelectedTag(entries[0].tag)
     }).catch(console.error)
 
-    appsApi.list().then(setApps).catch(console.error)
+    appsApi.list().then(list => {
+      setApps(list)
+      const active = list.filter((a: Application) => a.is_active)
+      if (active.length > 0) setSelectedAppId(active[0].id)
+    }).catch(console.error)
   }, [])
 
   const selected    = catalog.find(e => e.tag === selectedTag) ?? null
@@ -37,6 +41,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!selected) { setError('Select a release'); return }
+    if (isV2 && !selectedAppId) { setError('An application is required to start a run'); return }
     setLoading(true)
     try {
       const run = await runsApi.create({
@@ -45,7 +50,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
         priority:          5,
         triggered_by:      'user',
         triggered_by_user: triggeredByUser.trim() || undefined,
-        app_id:            (isV2 && selectedAppId) ? selectedAppId : undefined,
+        app_id:            selectedAppId || undefined,
       })
       onCreated(run)
       onClose()
@@ -67,7 +72,11 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <select
                 className="input w-full"
                 value={selectedTag}
-                onChange={e => { setSelectedTag(e.target.value); setSelectedAppId('') }}
+                onChange={e => {
+                  setSelectedTag(e.target.value)
+                  const active = apps.filter(a => a.is_active)
+                  setSelectedAppId(active.length > 0 ? active[0].id : '')
+                }}
               >
                 {catalog.map(entry => (
                   <option key={entry.tag} value={entry.tag}>
@@ -83,33 +92,33 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
             )}
           </div>
 
-          {/* Application selector (v2.x only) */}
+          {/* Application selector — required for v2.x */}
           <div>
             <label className="text-xs text-gray-400 block mb-1">
-              Application
+              Application *
               {!isV2 && <span className="text-gray-600 ml-1">(v2.x node required)</span>}
             </label>
-            <select
-              className="input w-full"
-              value={selectedAppId}
-              onChange={e => setSelectedAppId(e.target.value)}
-              disabled={!isV2}
-            >
-              <option value="">— None (raw node tests only) —</option>
-              {apps.filter(a => a.is_active).map(app => (
-                <option key={app.id} value={app.id}>{app.name}</option>
-              ))}
-            </select>
+            {isV2 && apps.filter(a => a.is_active).length === 0 ? (
+              <p className="text-xs text-rvp-error mt-1">
+                No active applications registered. Add one in the Apps page before triggering a run.
+              </p>
+            ) : (
+              <select
+                className="input w-full"
+                value={selectedAppId}
+                onChange={e => setSelectedAppId(e.target.value)}
+                disabled={!isV2}
+              >
+                {!isV2 && <option value="">— N/A for v1.x —</option>}
+                {apps.filter(a => a.is_active).map(app => (
+                  <option key={app.id} value={app.id}>{app.name}</option>
+                ))}
+              </select>
+            )}
             {selectedApp && (
               <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
                 {selectedApp.github_url}
               </div>
-            )}
-            {isV2 && !selectedAppId && (
-              <p className="text-xs text-yellow-600 mt-1">
-                Without an application the node starts without a machine snapshot. Health-check
-                tests pass; input/inspect tests will not.
-              </p>
             )}
           </div>
 
@@ -122,7 +131,8 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
           {error && <div className="text-xs text-rvp-error">{error}</div>}
 
           <div className="flex gap-2 pt-1">
-            <button type="submit" className="btn-primary flex-1" disabled={loading || !selected}>
+            <button type="submit" className="btn-primary flex-1"
+              disabled={loading || !selected || (isV2 && !selectedAppId)}>
               {loading ? 'Creating…' : 'Run Tests'}
             </button>
             <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>

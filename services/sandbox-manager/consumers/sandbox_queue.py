@@ -4,12 +4,16 @@ Consumes sandbox.queue (priority queue).
 Enforces MAX_SANDBOXES cap — only ACKs when a slot is available.
 Publishes SandboxEvents back on sandbox.events.
 
-Improvements over previous version:
-- Passes sdk_version + node_major_version to provisioner for v2.x stack selection
-- Real Anvil health check (exec_run cast block-number) instead of flat sleep
-- Cancellation checks before provisioning and before dispatching tests
-- Port offset initialised from live DB state on startup (survives restarts)
-- _wait_for_tests guards against the empty-set race (waits for dispatched_count > 0)
+Hardening additions
+-------------------
+Fix 1 – Startup orphan sweep: on start(), any sandbox left in provisioning/ready
+         state from a previous process is torn down before consuming new messages.
+Fix 2 – snapshot_volume persisted in DB: teardown can recover the per-sandbox
+         snapshot volume name after a restart without relying on in-memory state.
+Fix 3 – Periodic GC loop: every GC_INTERVAL_SECONDS, scan Docker for labelled
+         resources whose sandbox_id is no longer active and remove them.
+Fix 5 – Task tracking: in-flight _handle tasks are tracked in _running_tasks so
+         drain() can wait for them on graceful shutdown.
 """
 import asyncio
 import json
@@ -23,18 +27,19 @@ import aio_pika
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
-from pool import pool
+from pool import pool, MAX_SANDBOXES
 from provisioner import SandboxProvisioner
 from log_buffer import LogBatchBuffer
 
 log = logging.getLogger("sandbox-manager.consumer")
 
-RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:5672/")
-DATABASE_URL = os.environ.get("DATABASE_URL", "").replace(
+RABBITMQ_URL     = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:5672/")
+DATABASE_URL     = os.environ.get("DATABASE_URL", "").replace(
     "postgresql://", "postgresql+asyncpg://"
 )
 NODE_READY_DELAY = int(os.environ.get("NODE_READY_DELAY", "15"))
 V2_READY_TIMEOUT = int(os.environ.get("V2_READY_TIMEOUT", "120"))
+GC_INTERVAL      = int(os.environ.get("GC_INTERVAL_SECONDS", "600"))
 
 engine       = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -83,14 +88,22 @@ async def _upsert_sandbox(db: AsyncSession, sandbox_id: str, run_id: str, **kwar
 
 class SandboxQueueConsumer:
     def __init__(self):
-        self._connection = None
-        self._channel    = None
+        self._connection    = None
+        self._channel       = None
+        # Fix 5: track in-flight tasks for graceful drain
+        self._running_tasks: set[asyncio.Task] = set()
+        # Fix 3: GC background task handle
+        self._gc_task: Optional[asyncio.Task]  = None
 
     async def start(self):
         self._connection = await aio_pika.connect_robust(RABBITMQ_URL)
         self._channel    = await self._connection.channel()
-        await self._channel.set_qos(prefetch_count=1)
+        await self._channel.set_qos(prefetch_count=MAX_SANDBOXES)
         await self._init_port_offset()
+        # Fix 1: clean up any containers left from a previous process
+        await self._sweep_orphaned_sandboxes()
+        # Fix 3: start periodic GC loop
+        self._gc_task = asyncio.create_task(self._gc_loop())
 
     async def _init_port_offset(self):
         """Set _port_offset_counter past any ports already in use by active sandboxes."""
@@ -119,16 +132,147 @@ class SandboxQueueConsumer:
         except Exception as exc:
             log.warning("Could not initialise port offset from DB: %s", exc)
 
+    # ── Fix 1: Startup orphan sweep ────────────────────────────────────────────
+
+    async def _sweep_orphaned_sandboxes(self):
+        """
+        On startup, tear down any sandboxes left in provisioning/ready state from
+        a previous process.  The DB holds container_ids, docker_network, and
+        snapshot_volume (Fix 2), giving teardown everything it needs.
+        """
+        try:
+            async with SessionLocal() as db:
+                rows = await db.execute(
+                    text("""
+                        SELECT id, run_id, container_ids, docker_network, snapshot_volume
+                        FROM sandbox.sandboxes
+                        WHERE status IN ('provisioning', 'ready')
+                    """)
+                )
+                orphans = rows.fetchall()
+        except Exception as exc:
+            log.warning("Startup sweep: could not query DB: %s", exc)
+            return
+
+        if not orphans:
+            log.info("Startup sweep: no orphaned sandboxes found")
+            return
+
+        log.warning(
+            "Startup sweep: found %d orphaned sandbox(es) — tearing down", len(orphans)
+        )
+        for sbx in orphans:
+            sid = str(sbx.id)
+            log.info("Startup sweep: tearing down orphaned sandbox %s (run=%s)",
+                     sid[:8], str(sbx.run_id)[:8])
+            try:
+                await provisioner.teardown(
+                    sid,
+                    sbx.container_ids or [],
+                    sbx.docker_network or f"rvp-sbx-{sid[:8]}",
+                    per_sandbox_volume=sbx.snapshot_volume,
+                )
+            except Exception as exc:
+                log.warning("Startup sweep: teardown failed for sandbox %s: %s", sid[:8], exc)
+            finally:
+                try:
+                    async with SessionLocal() as db:
+                        await db.execute(
+                            text("""
+                                UPDATE sandbox.sandboxes
+                                SET status = 'closed', closed_at = :ts
+                                WHERE id = :id
+                            """),
+                            {"ts": datetime.now(tz=timezone.utc), "id": sid},
+                        )
+                        await db.commit()
+                except Exception as exc:
+                    log.warning("Startup sweep: could not mark sandbox %s closed: %s",
+                                sid[:8], exc)
+
+    # ── Fix 3: Periodic GC loop ────────────────────────────────────────────────
+
+    async def _gc_loop(self):
+        """
+        Run the Docker resource GC every GC_INTERVAL seconds.
+        Catches anything the normal teardown path missed (transient Docker errors,
+        SIGKILL during in-flight tasks, ephemeral build containers, etc.).
+        """
+        log.info("GC loop started (interval=%ds)", GC_INTERVAL)
+        while True:
+            await asyncio.sleep(GC_INTERVAL)
+            try:
+                await self._run_gc()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("GC loop error: %s", exc)
+
+    async def _run_gc(self):
+        """Query active sandbox IDs from DB then delegate Docker cleanup to provisioner."""
+        try:
+            async with SessionLocal() as db:
+                rows = await db.execute(
+                    text("""
+                        SELECT id::text FROM sandbox.sandboxes
+                        WHERE status IN ('provisioning', 'ready')
+                    """)
+                )
+                active_ids = {r[0] for r in rows.fetchall()}
+        except Exception as exc:
+            log.warning("GC: could not fetch active sandboxes from DB: %s", exc)
+            return
+
+        loop = asyncio.get_event_loop()
+        cleaned = await loop.run_in_executor(
+            None, provisioner.gc_orphaned_resources, active_ids
+        )
+        if cleaned:
+            log.info("GC run complete: cleaned up %d orphaned sandbox(es)", cleaned)
+        else:
+            log.debug("GC run complete: nothing to clean")
+
+    # ── Consumer loop ──────────────────────────────────────────────────────────
+
     async def run(self):
         queue = await self._channel.get_queue("sandbox.queue")
         async with queue.iterator() as q:
             async for message in q:
                 await pool.wait_for_slot()
-                async with message.process():
-                    try:
-                        await self._handle(json.loads(message.body))
-                    except Exception as exc:
-                        log.exception("Error handling sandbox request: %s", exc)
+                body = json.loads(message.body)
+                await message.ack()
+                # Fix 5: track task so drain() can wait for it
+                task = asyncio.create_task(self._handle(body))
+                self._running_tasks.add(task)
+                task.add_done_callback(self._running_tasks.discard)
+
+    # ── Fix 5: Graceful drain ──────────────────────────────────────────────────
+
+    async def drain(self, timeout: int = 120):
+        """
+        Wait for all in-flight _handle tasks to complete.
+        Called on SIGTERM before the process exits so containers are torn down
+        cleanly rather than left dangling.
+        """
+        if not self._running_tasks:
+            return
+        log.info("Draining %d in-flight sandbox task(s)…", len(self._running_tasks))
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*list(self._running_tasks), return_exceptions=True),
+                timeout=timeout,
+            )
+            log.info("All sandbox tasks drained cleanly")
+        except asyncio.TimeoutError:
+            log.warning(
+                "Drain timed out after %ds — %d task(s) still running; cancelling",
+                timeout, len(self._running_tasks),
+            )
+            for task in list(self._running_tasks):
+                task.cancel()
+            await asyncio.gather(*list(self._running_tasks), return_exceptions=True)
+
+    # ── Cancellation check ────────────────────────────────────────────────────
 
     async def _is_run_cancelled(self, run_id: str) -> bool:
         try:
@@ -142,6 +286,8 @@ class SandboxQueueConsumer:
         except Exception as exc:
             log.warning("Could not check run cancellation for %s: %s", run_id, exc)
             return False
+
+    # ── Sandbox lifecycle ──────────────────────────────────────────────────────
 
     async def _handle(self, msg: dict):
         global _port_offset_counter
@@ -250,8 +396,8 @@ class SandboxQueueConsumer:
             # ── For v2.x: also wait for the jsonrpc-api container to be running ─
             # (Anvil health check + contract deployment are handled inside provisioner)
             if node_major_version >= 2 and len(info["container_ids"]) >= 7:
-                db_container_id     = info["container_ids"][1]   # database is index 1
-                jsonrpc_container_id = info["container_ids"][-1]  # jsonrpc-api is last
+                db_container_id      = info["container_ids"][1]   # database is index 1
+                jsonrpc_container_id = info["container_ids"][6]   # jsonrpc-api is always index 6
                 ready = await provisioner.wait_for_v2_ready(
                     db_container_id, jsonrpc_container_id, V2_READY_TIMEOUT
                 )
@@ -266,7 +412,7 @@ class SandboxQueueConsumer:
                 log.info("Run %s cancelled after provisioning — tearing down", run_id)
                 return
 
-            # ── Mark ready, publish event ──────────────────────────────────────
+            # ── Mark ready — Fix 2: persist snapshot_volume to DB ─────────────
             app_address = info.get("app_address")
             async with SessionLocal() as db:
                 await _upsert_sandbox(db, sandbox_id, run_id,
@@ -276,6 +422,7 @@ class SandboxQueueConsumer:
                                       anvil_port=info["anvil_port"],
                                       node_port=info["node_port"],
                                       graphql_port=info["graphql_port"],
+                                      snapshot_volume=info.get("per_sandbox_volume"),
                                       ready_at=datetime.now(tz=timezone.utc))
 
                 # Persist app_address back to orchestrator.runs so the dashboard can show it
@@ -297,7 +444,7 @@ class SandboxQueueConsumer:
                 app_address=app_address,
             )
 
-            # ── Wait for tests to finish ───────────────────────────────────────
+            # ── Wait for all dispatched tests to complete ──────────────────────
             await self._wait_for_tests(sandbox_id, run_id)
 
         except Exception as exc:
@@ -346,15 +493,22 @@ class SandboxQueueConsumer:
     async def _teardown(self, sandbox_id: str, run_id: str):
         async with SessionLocal() as db:
             row = await db.execute(
-                text("SELECT container_ids, docker_network FROM sandbox.sandboxes WHERE id=:id"),
+                text("""
+                    SELECT container_ids, docker_network, snapshot_volume
+                    FROM sandbox.sandboxes WHERE id = :id
+                """),
                 {"id": sandbox_id},
             )
             sbx = row.fetchone()
 
         if sbx and sbx.container_ids:
-            # per_sandbox_volume is tracked in provisioner's in-memory dict
-            # (no need to store it in the DB — it's derived from sandbox_id)
-            await provisioner.teardown(sandbox_id, sbx.container_ids, sbx.docker_network or "")
+            # Fix 2: read snapshot_volume from DB (no longer relies on in-memory dict)
+            await provisioner.teardown(
+                sandbox_id,
+                sbx.container_ids,
+                sbx.docker_network or "",
+                per_sandbox_volume=sbx.snapshot_volume,
+            )
 
         async with SessionLocal() as db:
             await db.execute(
@@ -372,9 +526,6 @@ class SandboxQueueConsumer:
           release_catalog.cli_tag → cli_catalog.tag
           cli_catalog.devnet_tag  → devnet_catalog.tag
           devnet_catalog.contracts_tag → contracts_catalog.tag
-
-        After migration 0006 the denormalized columns (contracts_version,
-        node_release_tag) were dropped, so this is the only correct lookup path.
         """
         try:
             async with SessionLocal() as db:
@@ -401,5 +552,11 @@ class SandboxQueueConsumer:
             return None
 
     async def stop(self):
+        if self._gc_task:
+            self._gc_task.cancel()
+            try:
+                await self._gc_task
+            except asyncio.CancelledError:
+                pass
         if self._connection:
             await self._connection.close()

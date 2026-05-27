@@ -259,7 +259,7 @@ migrate:
 	$(COMPOSE) exec orchestrator alembic -c infra/migrations/alembic.ini upgrade head
 
 # migrate-all: run every SQL migration in order (idempotent — safe to re-run)
-migrate-all: migrate migrate-sdk migrate-cli migrate-catalogs migrate-contracts migrate-normalize migrate-apps migrate-logs
+migrate-all: migrate migrate-sdk migrate-cli migrate-catalogs migrate-contracts migrate-normalize migrate-apps migrate-logs migrate-sandbox-volume
 	@echo "All migrations applied."
 
 migrate-sdk:
@@ -302,6 +302,12 @@ migrate-logs:
 	@echo "Running migration 0008 (persistent run logs)..."
 	$(COMPOSE) exec postgres psql -U rvp rvp \
 	  -f /dev/stdin < infra/postgres/migrations/0008_run_logs.sql
+	@echo "Done."
+
+migrate-sandbox-volume:
+	@echo "Running migration 0009 (sandbox snapshot_volume column)..."
+	$(COMPOSE) exec postgres psql -U rvp rvp \
+	  -f /dev/stdin < infra/postgres/migrations/0009_sandbox_snapshot_volume.sql
 	@echo "Done."
 
 # ── Shells ────────────────────────────────────────────────────────────────────

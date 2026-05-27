@@ -619,6 +619,7 @@ class SandboxProvisioner:
             ports={"10012/tcp": inspect_port},
             environment=common_env,
             volumes=snapshot_volumes,
+            restart_policy={"Name": "on-failure", "MaximumRetryCount": 10},
             detach=True,
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "advancer"},
@@ -633,6 +634,7 @@ class SandboxProvisioner:
             name=f"rvp-validator-{short}",
             network=network,
             environment=common_env,
+            restart_policy={"Name": "on-failure", "MaximumRetryCount": 10},
             detach=True,
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "validator"},
@@ -646,6 +648,7 @@ class SandboxProvisioner:
             name=f"rvp-claimer-{short}",
             network=network,
             environment=common_env,
+            restart_policy={"Name": "on-failure", "MaximumRetryCount": 10},
             detach=True,
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "claimer"},
@@ -660,6 +663,7 @@ class SandboxProvisioner:
             network=network,
             ports={"10011/tcp": jsonrpc_port},
             environment=common_env,
+            restart_policy={"Name": "on-failure", "MaximumRetryCount": 10},
             detach=True,
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "jsonrpc-api"},
@@ -1287,8 +1291,9 @@ class SandboxProvisioner:
         )
         _log("info", f"Application deployed at {app_address}")
 
-        # ── 4. Register with node (best-effort) ───────────────────────────────
-        self._register_app_with_node_sync(advancer_container_id, app_address, _log)
+        # ── 4. Register with node ─────────────────────────────────────────────
+        self._register_app_with_node_sync(advancer_container_id, app_address, _log,
+                                          app_name=app_name)
 
         if log_buffer is not None:
             log_buffer.flush()
@@ -1508,39 +1513,52 @@ class SandboxProvisioner:
         advancer_container_id: str,
         app_address:           str,
         log_fn,
+        app_name: str = "app",
     ) -> None:
         """
-        Attempt to register the already-deployed application with the running
-        node using ``cartesi-rollups-cli register application``.
+        Register the deployed application with the node via
+        ``cartesi-rollups-cli app register``.
 
-        This is a best-effort step.  The evm-reader service watches the
-        SelfHostedApplicationFactory for ApplicationCreated events and will
-        register the application automatically once the deployment block is
-        processed.  If the CLI binary is absent from the runtime image (which
-        is common for minimal distroless builds), we log and continue.
+        The evm-reader does NOT auto-discover ApplicationCreated events — it
+        only polls for inputs to applications that are already registered in the
+        DB.  This CLI call is therefore NOT best-effort: if it fails the node
+        will never watch the deployed application.
+
+        Key flags:
+          --inputbox-from-env   reads CARTESI_CONTRACTS_INPUT_BOX_ADDRESS from
+                                the container env rather than from the contract's
+                                getDataAvailability() call, which returns 0x for
+                                Ethereum calldata mode and is rejected by the CLI.
         """
+        import re as _re
         import time as _time
-        # Give the evm-reader a moment to process the deployment block before
-        # we attempt a CLI-based registration.
-        _time.sleep(3)
+
+        # Sanitize app name: CLI requires lowercase letters, numbers, underscores, hyphens
+        safe_name = _re.sub(r"[^a-z0-9_-]", "-", app_name.lower()).strip("-") or "app"
+
         try:
             advancer = self.client.containers.get(advancer_container_id)
             ec, out = advancer.exec_run(
-                ["cartesi-rollups-cli", "register", "application",
-                 "--address", app_address],
+                [
+                    "cartesi-rollups-cli", "app", "register",
+                    "-a", app_address,
+                    "-n", safe_name,
+                    "-t", "/var/lib/cartesi-rollups-node/snapshot",
+                    "--inputbox-from-env",
+                ],
                 stdout=True, stderr=True, demux=False,
             )
             out_str = out.decode("utf-8", errors="replace") if out else ""
             if ec == 0:
-                log_fn("info", f"Node CLI registration succeeded for {app_address}")
+                log_fn("info", f"Node CLI registration succeeded for {app_address} (name={safe_name!r})")
             else:
-                log_fn("info",
-                       f"CLI register returned exit {ec} — evm-reader auto-detection "
-                       f"still active.  Output: {out_str[:300]}")
+                log_fn("error",
+                       f"CLI 'app register' failed (exit {ec}) — "
+                       f"evm-reader will NOT watch this application. Output: {out_str[:400]}")
         except Exception as exc:
-            log_fn("info",
-                   f"CLI register skipped ({type(exc).__name__}: {exc}) — "
-                   "evm-reader will detect ApplicationCreated event automatically")
+            log_fn("error",
+                   f"CLI register raised exception ({type(exc).__name__}: {exc}) — "
+                   "evm-reader will NOT watch this application")
 
     def _wait_for_app_registration_sync(
         self,
@@ -2166,6 +2184,16 @@ class SandboxProvisioner:
 
         try:
             net = self.client.networks.get(network_name)
+            # Disconnect all remaining endpoints before removal.
+            # Docker's endpoint deregistration is async relative to container.remove(),
+            # so the network can still show active endpoints even after all containers
+            # are gone. Forcing a disconnect clears them and makes net.remove() reliable.
+            net.reload()
+            for cid in list(net.attrs.get("Containers", {}).keys()):
+                try:
+                    net.disconnect(cid, force=True)
+                except Exception:
+                    pass
             net.remove()
             log.info("Removed network %s", network_name)
         except Exception as exc:
@@ -2198,3 +2226,108 @@ class SandboxProvisioner:
             _shutil.rmtree(compose_dir, ignore_errors=True)
         except Exception:
             pass
+
+    # ── Periodic garbage collector ─────────────────────────────────────────────
+
+    def gc_orphaned_resources(self, active_sandbox_ids: set) -> int:
+        """
+        Scan Docker for all resources labelled rvp.sandbox_id and remove any
+        whose sandbox_id is NOT in active_sandbox_ids (the set of sandboxes
+        currently provisioning or ready according to the DB).
+
+        Cleans up:
+          • All containers (running or exited) with rvp.sandbox_id label
+          • All bridge networks with rvp.sandbox_id label
+          • Per-sandbox snapshot volumes (rvp-snapshot-<short>) derived from
+            the orphaned sandbox IDs found above
+          • App build dirs (/tmp/rvp-app-builds/<short>) for orphaned sandboxes
+
+        Returns the count of orphaned sandbox IDs that had resources cleaned up.
+        Called periodically from the consumer GC loop via run_in_executor.
+        """
+        import shutil as _shutil
+        import os as _os
+
+        orphaned_ids: set = set()
+
+        # ── Containers ────────────────────────────────────────────────────────
+        try:
+            all_rvp_containers = self.client.containers.list(
+                all=True,
+                filters={"label": "rvp.sandbox_id"},
+            )
+        except Exception as exc:
+            log.warning("GC: could not list containers: %s", exc)
+            all_rvp_containers = []
+
+        for c in all_rvp_containers:
+            sid = c.labels.get("rvp.sandbox_id", "")
+            if not sid or sid in active_sandbox_ids:
+                continue
+            orphaned_ids.add(sid)
+            try:
+                c.remove(force=True)
+                log.info(
+                    "GC: removed orphaned container %s (sandbox=%s component=%s)",
+                    c.id[:12], sid[:8], c.labels.get("rvp.component", "?"),
+                )
+            except Exception as exc:
+                log.warning("GC: could not remove container %s: %s", c.id[:12], exc)
+
+        # ── Networks ──────────────────────────────────────────────────────────
+        try:
+            all_rvp_networks = self.client.networks.list(
+                filters={"label": "rvp.sandbox_id"},
+            )
+        except Exception as exc:
+            log.warning("GC: could not list networks: %s", exc)
+            all_rvp_networks = []
+
+        for net in all_rvp_networks:
+            sid = (net.attrs.get("Labels") or {}).get("rvp.sandbox_id", "")
+            if not sid or sid in active_sandbox_ids:
+                continue
+            try:
+                net.reload()
+                for cid in list(net.attrs.get("Containers", {}).keys()):
+                    try:
+                        net.disconnect(cid, force=True)
+                    except Exception:
+                        pass
+                net.remove()
+                log.info("GC: removed orphaned network %s (sandbox=%s)", net.name, sid[:8])
+            except Exception as exc:
+                log.warning("GC: could not remove network %s: %s", net.name, exc)
+
+        # ── Per-sandbox snapshot volumes + build dirs ─────────────────────────
+        for sid in orphaned_ids:
+            short = sid[:8]
+
+            vol_name = f"rvp-snapshot-{short}"
+            try:
+                vol = self.client.volumes.get(vol_name)
+                vol.remove(force=True)
+                log.info("GC: removed orphaned snapshot volume %s", vol_name)
+            except docker.errors.NotFound:
+                pass
+            except Exception as exc:
+                log.warning("GC: could not remove volume %s: %s", vol_name, exc)
+
+            build_dir = _os.path.join(APP_BUILD_DIR, short)
+            if _os.path.isdir(build_dir):
+                try:
+                    _shutil.rmtree(build_dir, ignore_errors=True)
+                    log.info("GC: removed orphaned build dir %s", build_dir)
+                except Exception as exc:
+                    log.warning("GC: could not remove build dir %s: %s", build_dir, exc)
+
+        if orphaned_ids:
+            log.info(
+                "GC: cleaned up resources for %d orphaned sandbox(es): %s",
+                len(orphaned_ids),
+                ", ".join(s[:8] for s in orphaned_ids),
+            )
+        else:
+            log.debug("GC: no orphaned resources found")
+
+        return len(orphaned_ids)

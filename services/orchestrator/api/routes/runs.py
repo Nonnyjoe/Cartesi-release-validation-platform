@@ -36,6 +36,10 @@ class TriggerRunRequest(BaseModel):
     triggered_by: str = "user"        # must be: github_release | user | scheduled
     triggered_by_user: Optional[str] = None
     app_id:       Optional[str] = None  # UUID of tests.applications row; None = raw node tests only
+    # Optional overrides — bypass catalog lookup when explicitly provided
+    sdk_version:        Optional[str] = None
+    cli_version:        Optional[str] = None
+    node_major_version: Optional[int] = None
 
 
 class RunResponse(BaseModel):
@@ -139,11 +143,11 @@ async def trigger_run(
         {"tag": body.release_tag},
     )
     catalog           = catalog_row.fetchone()
-    sdk_version       = catalog.sdk_version       if catalog else None
-    cli_version       = catalog.cli_version       if catalog else None
+    sdk_version       = body.sdk_version       or (catalog.sdk_version       if catalog else None)
+    cli_version       = body.cli_version       or (catalog.cli_version       if catalog else None)
     devnet_version    = catalog.devnet_version    if catalog else None
     contracts_version = catalog.contracts_version if catalog else None
-    node_major        = catalog.node_major_version if catalog else _major(body.release_tag)
+    node_major        = body.node_major_version or (catalog.node_major_version if catalog else _major(body.release_tag))
 
     # Publish sandbox request onto the priority queue
     await publish_sandbox_request(
