@@ -88,6 +88,53 @@ DEVNET_ENV = {
     "CARTESI_CONTRACTS_SELF_HOSTED_APPLICATION_FACTORY_ADDRESS": "0x010D3CbB4223F5bCc7b7B03cEE59f3aAea8eDb8A",
 }
 
+# ── Deterministic portal addresses (rollups-contracts v2.x, CREATE2 deployment) ──
+# These addresses are the same on any EVM chain because rollups-contracts uses
+# CREATE2 with a fixed salt.  They are used as fallbacks when cannon-deployer does
+# not emit portal addresses (e.g. older contracts versions or extraction failure).
+DEVNET_PORTALS = {
+    "ether_portal_address":   "0xA632c5c05812c6a6149B7af5C56117d1D2603828",
+    "erc20_portal_address":   "0xaca6586a0cf05bd831f2501e7b4aea550da6562d",
+    "erc721_portal_address":  "0x9e8851dadb2b77103928518846c4678d48b5e371",
+    "erc1155_portal_address": "0x18558398dd1a8ce20956287a4da7b76ae7a96662",
+}
+
+# ── Test token Solidity sources (OpenZeppelin wrappers) ───────────────────────
+# Thin wrappers that inherit from OpenZeppelin standard implementations and
+# expose a public mint() for use in portal-deposit tests.  Deployed once per
+# v2.x sandbox during setup; deploy script installs OZ via forge soldeer.
+# Identical to the contracts in services/test-runner/executors/portal_deposit.py
+# — keep in sync.
+_TEST_ERC20_SOL = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+contract TestERC20 is ERC20 {
+    constructor() ERC20("Test Token", "TST") {}
+    function mint(address to, uint256 amount) external { _mint(to, amount); }
+}
+"""
+
+_TEST_ERC721_SOL = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+contract TestERC721 is ERC721 {
+    constructor() ERC721("Test NFT", "TNFT") {}
+    function mint(address to, uint256 tokenId) external { _safeMint(to, tokenId); }
+}
+"""
+
+_TEST_ERC1155_SOL = """\
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+contract TestERC1155 is ERC1155 {
+    constructor() ERC1155("") {}
+    function mint(address to, uint256 id, uint256 amount) external { _mint(to, id, amount, ""); }
+}
+"""
+
 # ── Health + deployment timeouts ──────────────────────────────────────────────
 SANDBOX_HEALTH_TIMEOUT = int(os.environ.get("SANDBOX_HEALTH_TIMEOUT", "60"))
 
@@ -341,7 +388,29 @@ class SandboxProvisioner:
                 _step("contracts_skipped", "info",
                       reason="No contracts_version for this release — using built-in devnet addresses")
 
-            # 5. Start node services
+            # 5. Deploy test token contracts (ERC20/ERC721/ERC1155) once per sandbox
+            # so deposit assertions can skip forge compile and just mint/approve/deposit.
+            # Only needed for v2.x (portal deposit tests are v2-only).
+            token_addrs: dict[str, str] = {}
+            if node_major_version >= 2:
+                _step("tokens_deploying", "info")
+                try:
+                    token_addrs = self._deploy_test_tokens_sync(
+                        sandbox_id, anvil.id, step_cb=_step, log_buffer=log_buffer,
+                    )
+                    _step("tokens_deployed", "ok",
+                          erc20=token_addrs.get("erc20", ""),
+                          erc721=token_addrs.get("erc721", ""),
+                          erc1155=token_addrs.get("erc1155", ""))
+                except Exception as exc:
+                    log.error(
+                        "Test token deployment failed for sandbox %s: %s — aborting provisioning",
+                        sandbox_id, exc,
+                    )
+                    _step("tokens_deploy_failed", "failed", reason=str(exc)[:200])
+                    raise RuntimeError(f"Token deployment failed: {exc}") from exc
+
+            # 6. Start node services
             if node_major_version >= 2 and sdk_version:
                 _step("node_starting", "info",
                       node_major_version=node_major_version, sdk_version=sdk_version)
@@ -463,6 +532,22 @@ class SandboxProvisioner:
                                 per_sandbox_volume=per_sandbox_volume)
             raise
 
+        # Resolve which InputBox address is actually in use for this sandbox.
+        # For v2.x this comes from the cannon-deployer result or falls back to DEVNET_ENV.
+        # For v1.x it is hardcoded in _start_v1_node.
+        if node_major_version >= 2:
+            resolved_addrs = contract_addresses or DEVNET_ENV
+            inputbox_address = resolved_addrs.get("CARTESI_CONTRACTS_INPUT_BOX_ADDRESS",
+                                                   DEVNET_ENV["CARTESI_CONTRACTS_INPUT_BOX_ADDRESS"])
+            # Portal addresses: prefer cannon-extracted, fall back to deterministic defaults
+            portal_addrs = {
+                k: (contract_addresses or {}).get(k) or DEVNET_PORTALS[k]
+                for k in DEVNET_PORTALS
+            }
+        else:
+            inputbox_address = "0x59b22D57D4f067708AB0c00552767405926dc768"
+            portal_addrs = {k: None for k in DEVNET_PORTALS}
+
         log.info("Sandbox %s provisioned: %d containers (cli=%s, app_address=%s)",
                  sandbox_id, len(container_ids), cli_container_name, app_address)
         return {
@@ -475,7 +560,13 @@ class SandboxProvisioner:
             "graphql_port":         graphql_port,
             "cli_container_name":   cli_container_name,
             "app_address":          app_address,
+            "inputbox_address":     inputbox_address,
             "per_sandbox_volume":   per_sandbox_volume,
+            # Pre-deployed test token addresses (v2.x only; empty strings if deployment failed)
+            "erc20_token_address":  token_addrs.get("erc20",  ""),
+            "erc721_token_address": token_addrs.get("erc721", ""),
+            "erc1155_token_address":token_addrs.get("erc1155",""),
+            **portal_addrs,
         }
 
     # ── Container launchers ────────────────────────────────────────────────────
@@ -1828,6 +1919,12 @@ class SandboxProvisioner:
                     addresses["application_factory"],
                 "CARTESI_CONTRACTS_SELF_HOSTED_APPLICATION_FACTORY_ADDRESS":
                     addresses["self_hosted_application_factory"],
+                # Portal addresses extracted from cannon deployment (may be empty
+                # for older contracts_versions — provisioner falls back to DEVNET_PORTALS)
+                "ether_portal_address":   addresses.get("ether_portal",  ""),
+                "erc20_portal_address":   addresses.get("erc20_portal",  ""),
+                "erc721_portal_address":  addresses.get("erc721_portal", ""),
+                "erc1155_portal_address": addresses.get("erc1155_portal",""),
             }
         finally:
             # Always remove the deployer (it has exited by this point)
@@ -1837,6 +1934,128 @@ class SandboxProvisioner:
             except Exception as exc:
                 log.debug("Could not remove deployer container %s: %s",
                           deployer_name, exc)
+
+    # ── Test token deployment ──────────────────────────────────────────────────
+
+    def _deploy_test_tokens_sync(
+        self,
+        sandbox_id: str,
+        anvil_cid:  str,
+        step_cb=None,
+        log_buffer=None,
+    ) -> dict[str, str]:
+        """
+        Deploy minimal ERC20, ERC721, and ERC1155 test token contracts on the
+        sandbox Anvil using a temporary Foundry container.
+
+        Run once during provisioning (v2.x sandboxes only) so that
+        portal-deposit assertions can reuse the pre-deployed contracts and skip
+        the slow `forge create` step.
+
+        Returns {"erc20": "0x...", "erc721": "0x...", "erc1155": "0x..."}.
+        Raises RuntimeError on failure — caller treats this as non-fatal and
+        falls back to per-test deployment.
+        """
+        import base64, json as _json
+
+        def b64(s: str) -> str:
+            return base64.b64encode(s.encode()).decode()
+
+        short = sandbox_id[:8]
+        cname = f"rvp-token-deploy-{short}"
+
+        erc20_b64   = b64(_TEST_ERC20_SOL)
+        erc721_b64  = b64(_TEST_ERC721_SOL)
+        erc1155_b64 = b64(_TEST_ERC1155_SOL)
+        rpc         = "http://localhost:8545"
+
+        # Build a proper Foundry project so OZ imports resolve correctly.
+        # forge install --no-git clones from GitHub without requiring a git project.
+        script = (
+            f"set -e\n"
+            f"PROJ=/tmp/tokens-{short}\n"
+            f"mkdir -p $PROJ/src && cd $PROJ\n"
+            # Minimal foundry.toml so forge recognises the project root
+            f"printf '[profile.default]\\nsrc = \"src\"\\nout = \"out\"\\nlibs = [\"lib\"]\\n' > foundry.toml\n"
+            # Install OpenZeppelin 5.0.0 from GitHub (git is pre-installed in the Foundry image)
+            f"forge install --no-git OpenZeppelin/openzeppelin-contracts@v5.0.0 2>&1\n"
+            # Map @openzeppelin/contracts/ → OZ contracts directory
+            f"printf '@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/\\n' > remappings.txt\n"
+            # Decode OZ wrapper contracts from base64
+            f"echo '{erc20_b64}'   | base64 -d > src/TestERC20.sol\n"
+            f"echo '{erc721_b64}'  | base64 -d > src/TestERC721.sol\n"
+            f"echo '{erc1155_b64}' | base64 -d > src/TestERC1155.sol\n"
+            # Deploy all three (--broadcast required in Foundry 1.0+ to actually send)
+            f"forge create src/TestERC20.sol:TestERC20 "
+            f"  --rpc-url {rpc} --private-key {DEPLOYER_KEY} --broadcast 2>&1 | tee /tmp/e20.txt\n"
+            f"ERC20=$(grep 'Deployed to:' /tmp/e20.txt | awk '{{print $3}}')\n"
+            f"forge create src/TestERC721.sol:TestERC721 "
+            f"  --rpc-url {rpc} --private-key {DEPLOYER_KEY} --broadcast 2>&1 | tee /tmp/e721.txt\n"
+            f"ERC721=$(grep 'Deployed to:' /tmp/e721.txt | awk '{{print $3}}')\n"
+            f"forge create src/TestERC1155.sol:TestERC1155 "
+            f"  --rpc-url {rpc} --private-key {DEPLOYER_KEY} --broadcast 2>&1 | tee /tmp/e1155.txt\n"
+            f"ERC1155=$(grep 'Deployed to:' /tmp/e1155.txt | awk '{{print $3}}')\n"
+            # Use printf with single-quoted format string so inner " are literal,
+            # not parsed by bash as string delimiters.
+            f"printf '{{\"erc20\":\"%s\",\"erc721\":\"%s\",\"erc1155\":\"%s\"}}' \"$ERC20\" \"$ERC721\" \"$ERC1155\"\n"
+        )
+
+        try:
+            self.client.containers.get(cname).remove(force=True)
+        except Exception:
+            pass
+
+        log.info("Deploying test tokens for sandbox %s…", short)
+        c = self.client.containers.run(
+            ANVIL_IMAGE,
+            command=[script],
+            name=cname,
+            network_mode=f"container:{anvil_cid}",
+            detach=True,
+            remove=False,
+            labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "token-deployer"},
+        )
+        try:
+            result = c.wait(timeout=300)
+            output = c.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+
+            if log_buffer is not None:
+                for line in output.splitlines():
+                    line = line.strip()
+                    if line:
+                        log_buffer.append("deploy", "info", f"[token-deploy] {line}")
+
+            if result["StatusCode"] != 0:
+                raise RuntimeError(
+                    f"Token deploy container exited {result['StatusCode']}: "
+                    f"{output[-600:]}"
+                )
+
+            # Last line of output is the JSON address dict
+            json_line = ""
+            for line in reversed(output.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    json_line = line
+                    break
+
+            if not json_line:
+                raise RuntimeError(
+                    f"No JSON address output from token deployer: {output[-400:]}"
+                )
+
+            addrs = _json.loads(json_line)
+            log.info(
+                "Test tokens deployed for sandbox %s — ERC20=%s ERC721=%s ERC1155=%s",
+                short, addrs.get("erc20", "?"),
+                addrs.get("erc721", "?"), addrs.get("erc1155", "?"),
+            )
+            return addrs
+        finally:
+            try:
+                c.remove(force=True)
+            except Exception:
+                pass
 
     # ── Health checks ──────────────────────────────────────────────────────────
 

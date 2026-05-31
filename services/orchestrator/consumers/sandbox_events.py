@@ -227,7 +227,12 @@ class SandboxEventConsumer:
                            or (run.app_address if run else None))
 
             all_rows = await db.execute(
-                text("SELECT id, slug, version FROM tests.definitions WHERE is_active = true")
+                text("""
+                    SELECT id, slug, version FROM tests.definitions
+                    WHERE is_active = true
+                    AND min_node_major_version = :node_version
+                """),
+                {"node_version": node_major_version},
             )
             all_definitions = all_rows.fetchall()
 
@@ -245,21 +250,29 @@ class SandboxEventConsumer:
             exchange = await ch.get_exchange("rvp.tests")
             for defn in definitions:
                 body = json.dumps({
-                    "event_id":            str(uuid.uuid4()),
-                    "run_id":              run_id,
-                    "sandbox_id":          sandbox_id,
-                    "service":             "orchestrator",
-                    "ts":                  datetime.now(tz=timezone.utc).isoformat(),
-                    "definition_id":       str(defn.id),
-                    "definition_version":  defn.version,
-                    "definition_slug":     defn.slug,
-                    "anvil_port":          sandbox_msg.get("anvil_port"),
-                    "node_port":           sandbox_msg.get("node_port"),
-                    "graphql_port":        sandbox_msg.get("graphql_port"),
-                    "docker_network":      sandbox_msg.get("docker_network"),
-                    "node_major_version":  node_major_version,
-                    "cli_container_name":  sandbox_msg.get("cli_container_name"),
-                    "app_address":         app_address,
+                    "event_id":              str(uuid.uuid4()),
+                    "run_id":                run_id,
+                    "sandbox_id":            sandbox_id,
+                    "service":               "orchestrator",
+                    "ts":                    datetime.now(tz=timezone.utc).isoformat(),
+                    "definition_id":         str(defn.id),
+                    "definition_version":    defn.version,
+                    "definition_slug":       defn.slug,
+                    "anvil_port":            sandbox_msg.get("anvil_port"),
+                    "node_port":             sandbox_msg.get("node_port"),
+                    "graphql_port":          sandbox_msg.get("graphql_port"),
+                    "docker_network":        sandbox_msg.get("docker_network"),
+                    "node_major_version":    node_major_version,
+                    "cli_container_name":    sandbox_msg.get("cli_container_name"),
+                    "app_address":           app_address,
+                    "inputbox_address":       sandbox_msg.get("inputbox_address"),
+                    "ether_portal_address":   sandbox_msg.get("ether_portal_address"),
+                    "erc20_portal_address":   sandbox_msg.get("erc20_portal_address"),
+                    "erc721_portal_address":  sandbox_msg.get("erc721_portal_address"),
+                    "erc1155_portal_address": sandbox_msg.get("erc1155_portal_address"),
+                    "erc20_token_address":    sandbox_msg.get("erc20_token_address"),
+                    "erc721_token_address":   sandbox_msg.get("erc721_token_address"),
+                    "erc1155_token_address":  sandbox_msg.get("erc1155_token_address"),
                 }).encode()
                 await exchange.publish(
                     mq.Message(body=body, content_type="application/json",

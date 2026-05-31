@@ -125,6 +125,13 @@ AUTH_FACTORY="$(read_addr 'AuthorityFactory')"
 APP_FACTORY="$(read_addr 'ApplicationFactory')"
 SELF_HOSTED="$(read_addr 'SelfHostedApplicationFactory')"
 
+# Portal contracts — deployed by the same cannonfile; extract if present.
+# Empty string is acceptable — provisioner falls back to deterministic defaults.
+ETHER_PORTAL="$(read_addr 'EtherPortal')"
+ERC20_PORTAL="$(read_addr 'ERC20Portal')"
+ERC721_PORTAL="$(read_addr 'ERC721Portal')"
+ERC1155_PORTAL="$(read_addr 'ERC1155SinglePortal')"
+
 if [[ -z "${INPUT_BOX}" || "${INPUT_BOX}" == "null" ]]; then
   echo "[cannon-deployer] ERROR: could not find InputBox address" >&2
   echo "[cannon-deployer] Files in ${DEPLOY_DIR}:" >&2
@@ -133,8 +140,12 @@ if [[ -z "${INPUT_BOX}" || "${INPUT_BOX}" == "null" ]]; then
 fi
 
 jq -cn \
-  --arg ib  "${INPUT_BOX}" \
-  --arg af  "${AUTH_FACTORY}" \
-  --arg cf  "${APP_FACTORY}" \
-  --arg shf "${SELF_HOSTED}" \
-  '{input_box:$ib,authority_factory:$af,application_factory:$cf,self_hosted_application_factory:$shf}'
+  --arg ib     "${INPUT_BOX}" \
+  --arg af     "${AUTH_FACTORY}" \
+  --arg cf     "${APP_FACTORY}" \
+  --arg shf    "${SELF_HOSTED}" \
+  --arg ether  "${ETHER_PORTAL}" \
+  --arg erc20  "${ERC20_PORTAL}" \
+  --arg erc721 "${ERC721_PORTAL}" \
+  --arg erc1155 "${ERC1155_PORTAL}" \
+  '{input_box:$ib,authority_factory:$af,application_factory:$cf,self_hosted_application_factory:$shf,ether_portal:$ether,erc20_portal:$erc20,erc721_portal:$erc721,erc1155_portal:$erc1155}'

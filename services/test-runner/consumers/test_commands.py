@@ -80,6 +80,10 @@ class TestCommandConsumer:
         docker_network      = msg["docker_network"]
         node_major_version  = int(msg.get("node_major_version", 1))
         cli_container_name  = msg.get("cli_container_name")
+        inputbox_address    = msg.get("inputbox_address")
+        erc20_token_address  = msg.get("erc20_token_address")
+        erc721_token_address = msg.get("erc721_token_address")
+        erc1155_token_address = msg.get("erc1155_token_address")
 
         log.info("Test command received: %s (run=%s)", definition_slug, run_id)
 
@@ -126,6 +130,14 @@ class TestCommandConsumer:
             node_major_version=node_major_version,
             cli_container_name=cli_container_name,
             app_address=app_address,
+            inputbox_address=inputbox_address,
+            ether_portal_address=msg.get("ether_portal_address"),
+            erc20_portal_address=msg.get("erc20_portal_address"),
+            erc721_portal_address=msg.get("erc721_portal_address"),
+            erc1155_portal_address=msg.get("erc1155_portal_address"),
+            erc20_token_address=erc20_token_address,
+            erc721_token_address=erc721_token_address,
+            erc1155_token_address=erc1155_token_address,
         )
 
         # Insert a running result row

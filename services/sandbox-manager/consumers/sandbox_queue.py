@@ -442,6 +442,14 @@ class SandboxQueueConsumer:
                 container_ids=info["container_ids"],
                 cli_container_name=info.get("cli_container_name"),
                 app_address=app_address,
+                inputbox_address=info.get("inputbox_address"),
+                ether_portal_address=info.get("ether_portal_address"),
+                erc20_portal_address=info.get("erc20_portal_address"),
+                erc721_portal_address=info.get("erc721_portal_address"),
+                erc1155_portal_address=info.get("erc1155_portal_address"),
+                erc20_token_address=info.get("erc20_token_address"),
+                erc721_token_address=info.get("erc721_token_address"),
+                erc1155_token_address=info.get("erc1155_token_address"),
             )
 
             # ── Wait for all dispatched tests to complete ──────────────────────
