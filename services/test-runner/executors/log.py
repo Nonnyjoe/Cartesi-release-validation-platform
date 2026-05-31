@@ -31,6 +31,13 @@ class LogContainsExecutor(AssertionExecutor):
         component = assertion.get("component", "node")
         t0 = time.monotonic()
 
+        # v2.x has no single "node" container — map to the primary processing service.
+        # "node" in definitions written for v1.x maps to the advancer in v2.x
+        # (it processes inputs and logs the relevant activity).
+        # Callers can also pass explicit v2.x component names (advancer, evm-reader, etc.).
+        if ctx.node_major_version >= 2 and component == "node":
+            component = "advancer"
+
         container_name = f"rvp-{component}-{ctx.sandbox_id[:8]}"
         try:
             container = self.docker.containers.get(container_name)

@@ -60,18 +60,32 @@ class TestResultConsumer:
         log.info("Test result: %s → %s  run=%s", slug, msg.get("status"), run_id)
 
         async with AsyncSessionLocal() as db:
-            # Check remaining pending/running tests for this run
-            pending = await db.execute(
+            # Compare completed results against the dispatched count from run metadata.
+            # Tests are processed sequentially by the test-runner, so later tests may
+            # not yet have a results row when an early result arrives — checking only
+            # for 'pending'/'running' rows would prematurely close the run.
+            counts = await db.execute(
                 text("""
-                    SELECT COUNT(*) FROM tests.results
-                    WHERE run_id = :run_id AND status IN ('pending', 'running')
+                    SELECT
+                      COALESCE((r.metadata->>'dispatched_count')::int, 0) AS dispatched,
+                      COUNT(res.id) FILTER (WHERE res.status NOT IN ('running', 'pending')) AS finished,
+                      COUNT(res.id) FILTER (WHERE res.status IN ('running', 'pending'))     AS in_flight
+                    FROM orchestrator.runs r
+                    LEFT JOIN tests.results res ON res.run_id = r.id
+                    WHERE r.id = :run_id
+                    GROUP BY r.metadata
                 """),
                 {"run_id": run_id},
             )
-            remaining = pending.scalar()
+            row_c = counts.fetchone()
+            if not row_c:
+                return
+            dispatched = row_c.dispatched
+            finished   = row_c.finished
+            in_flight  = row_c.in_flight
 
-            if remaining > 0:
-                return  # More tests still in flight
+            if in_flight > 0 or finished < dispatched:
+                return  # Still waiting for tests to start or complete
 
             # Compute pass rate
             stats = await db.execute(

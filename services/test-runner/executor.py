@@ -14,6 +14,9 @@ from executors.http import HttpStatusExecutor
 from executors.log import LogContainsExecutor
 from executors.chain import ChainTxExecutor
 from executors.voucher import VoucherExecutor
+from executors.jsonrpc import JsonRpcExecutor
+from executors.portal_deposit import PortalDepositExecutor
+from executors.voucher_v2 import VoucherV2Executor
 
 log = logging.getLogger("test-runner.executor")
 
@@ -25,6 +28,9 @@ _EXECUTORS: dict[str, AssertionExecutor] = {
         LogContainsExecutor(),
         ChainTxExecutor(),
         VoucherExecutor(),
+        JsonRpcExecutor(),
+        PortalDepositExecutor(),
+        VoucherV2Executor(),
     ]
 }
 
