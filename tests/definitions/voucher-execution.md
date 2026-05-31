@@ -12,10 +12,10 @@ requires:
   - cartesi-node
   - graphql
 inputs:
-  payload: "0xvoucher01"
+  payload: "0x766f75636865723031"
 assertions:
   - type: chain_tx
-    payload: "0xvoucher01"
+    payload: "0x766f75636865723031"
   - type: voucher
     expect_count: 1
   - type: graphql

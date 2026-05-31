@@ -12,11 +12,11 @@ requires:
   - cartesi-node
   - graphql
 inputs:
-  payload: "0xepoch01"
+  payload: "0x65706f63683031"
   blocks_to_advance: 7200
 assertions:
   - type: chain_tx
-    payload: "0xepoch01"
+    payload: "0x65706f63683031"
   - type: graphql
     query: |
       { epochs { edges { node { index status } } } }
