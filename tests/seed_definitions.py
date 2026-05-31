@@ -51,6 +51,7 @@ async def seed():
             priority  = meta.get("priority", "medium")
             timeout   = int(meta.get("timeout_seconds", 120))
             release   = meta.get("release_introduced")
+            min_node_major_version = int(meta.get("min_node_major_version", 1))
 
             # Remove body from parsed JSON (it's a UI convenience field)
             parsed = {k: v for k, v in meta.items() if k != "body"}
@@ -59,9 +60,9 @@ async def seed():
                 INSERT INTO tests.definitions
                   (id, slug, name, version, tags, component, priority,
                    timeout_seconds, release_introduced, definition_raw, definition_parsed,
-                   is_active, created_by)
+                   min_node_major_version, is_active, created_by)
                 VALUES
-                  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, 'seed')
+                  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, 'seed')
                 ON CONFLICT (slug) DO UPDATE SET
                   name=EXCLUDED.name,
                   version=EXCLUDED.version,
@@ -71,11 +72,12 @@ async def seed():
                   timeout_seconds=EXCLUDED.timeout_seconds,
                   definition_raw=EXCLUDED.definition_raw,
                   definition_parsed=EXCLUDED.definition_parsed,
+                  min_node_major_version=EXCLUDED.min_node_major_version,
                   updated_at=now()
             """,
                 str(uuid.uuid4()), slug, name, version,
                 tags, component, priority, timeout, release,
-                raw, json.dumps(parsed),
+                raw, json.dumps(parsed), min_node_major_version,
             )
             print(f"  ✓ {slug}")
 
