@@ -473,11 +473,16 @@ class VoucherV2Executor(AssertionExecutor):
                 resp = await client.post(
                     ctx.jsonrpc_rpc_url,
                     json={"jsonrpc": "2.0", "method": "cartesi_listOutputs",
-                          "params": [app_id], "id": 1},
+                          "params": {"application": app_id, "limit": 1000}, "id": 1},
                     headers={"Content-Type": "application/json"},
                 )
-                data = resp.json().get("result", {}).get("data", [])
-                return len(data)
+                body = resp.json()
+                result = body.get("result", {})
+                # Prefer pagination.total_count if available (avoids fetching all data).
+                pagination = result.get("pagination", {})
+                if pagination and "total_count" in pagination:
+                    return pagination["total_count"]
+                return len(result.get("data", []))
         except Exception:
             return 0
 
@@ -507,7 +512,10 @@ class VoucherV2Executor(AssertionExecutor):
                         json={
                             "jsonrpc": "2.0",
                             "method":  "cartesi_listOutputs",
-                            "params":  [app_id],
+                            # Named params with high limit to fetch all outputs.
+                            # The positional-array form defaults to limit=50 and
+                            # silently truncates when more outputs exist.
+                            "params":  {"application": app_id, "limit": 1000},
                             "id":      1,
                         },
                         headers={"Content-Type": "application/json"},
