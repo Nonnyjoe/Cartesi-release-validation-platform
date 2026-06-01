@@ -4,6 +4,7 @@ name: Ether Portal Deposit (v2.x)
 version: 1
 min_node_major_version: 2
 tags: [portal, deposit, ether, assets, v2]
+csv_ids: ["3.3"]
 release_introduced: v2.0.0
 component: advancer
 priority: high

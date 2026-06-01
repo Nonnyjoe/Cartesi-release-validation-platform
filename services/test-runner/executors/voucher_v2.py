@@ -35,6 +35,8 @@ from .base import AssertionExecutor, AssertionResult, SandboxContext
 log = logging.getLogger("test-runner.executor.voucher_v2")
 
 _DEPLOYER_KEY  = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+# Account #4 — dedicated to executeOutput calls; never used for token minting or deposits
+_EXECUTE_OUT_KEY = "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"
 _FOUNDRY_IMG   = "ghcr.io/foundry-rs/foundry:latest"
 _ANVIL_RPC     = "http://localhost:8545"
 _SETUP_AMOUNT  = 1000
@@ -119,16 +121,19 @@ class VoucherV2Executor(AssertionExecutor):
         }, separators=(",", ":"))
         withdraw_hex = "0x" + withdraw_json.encode().hex()
 
+        # --gas-price 100gwei avoids "replacement transaction underpriced" on
+        # Anvil interval mining when account #0 has an unresolved pending tx.
+        _GAS = "--gas-price 100gwei"
         script = (
             f"set -e\n"
-            f"cast send --rpc-url {_ANVIL_RPC} --private-key {deployer_key} \\\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {deployer_key} \\\n"
             f"  {token} 'mint(address,uint256)' {sender_addr} {amount} 2>&1\n"
-            f"cast send --rpc-url {_ANVIL_RPC} --private-key {deployer_key} \\\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {deployer_key} \\\n"
             f"  {token} 'approve(address,uint256)' {portal} {amount} 2>&1\n"
-            f"cast send --rpc-url {_ANVIL_RPC} --private-key {deployer_key} \\\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {deployer_key} \\\n"
             f"  {portal} 'depositERC20Tokens(address,address,uint256,bytes)' \\\n"
             f"  {token} {app} {amount} 0x 2>&1\n"
-            f"cast send --rpc-url {_ANVIL_RPC} --private-key {deployer_key} \\\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {deployer_key} \\\n"
             f"  {inputbox} 'addInput(address,bytes)' {app} {withdraw_hex} 2>&1\n"
         )
 
@@ -137,7 +142,7 @@ class VoucherV2Executor(AssertionExecutor):
             # transfer voucher (transfer(wallet, amount)) can succeed when
             # executeOutput is called on-chain. The deployer_key mints them.
             script += (
-                f"cast send --rpc-url {_ANVIL_RPC} --private-key {_DEPLOYER_KEY} \\\n"
+                f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {_DEPLOYER_KEY} \\\n"
                 f"  {token} 'mint(address,uint256)' {app} {amount} 2>&1\n"
             )
 
@@ -234,40 +239,57 @@ class VoucherV2Executor(AssertionExecutor):
                 duration_ms=elapsed * 1000,
             )
 
-        voucher   = vouchers[0]
-        app_addr  = ctx.app_address or ""
+        app_addr = ctx.app_address or ""
 
-        # Phase 2: call CartesiDApp.executeOutput via Foundry container
-        raw_data      = voucher.get("raw_data", "0x")
-        output_index  = int(voucher.get("index", "0x0"), 16)
-        siblings      = voucher.get("output_hashes_siblings", [])
+        # Phase 2: try each voucher until one executes successfully.
+        # Multiple execute-mode tests run against the same pool of vouchers;
+        # earlier tests may have already executed some, so we rotate through
+        # the list and skip any that revert with OutputNotReexecutable.
+        loop = asyncio.get_event_loop()
+        last_detail = "no vouchers attempted"
+        for voucher in vouchers:
+            raw_data     = voucher.get("raw_data", "0x")
+            output_index = int(voucher.get("index", "0x0"), 16)
+            siblings     = voucher.get("output_hashes_siblings", [])
 
-        log.info("Executing output: index=%d raw_data=%s…", output_index, raw_data[:12])
-        script = self._build_execute_output_script(app_addr, raw_data, output_index, siblings)
-        loop   = asyncio.get_event_loop()
-        try:
-            output = await loop.run_in_executor(
-                None, self._run_foundry_script_sync, script, ctx.sandbox_id
-            )
-        except Exception as exc:
+            log.info("Executing output: index=%d raw_data=%s…", output_index, raw_data[:12])
+            script = self._build_execute_output_script(app_addr, raw_data, output_index, siblings)
+            try:
+                output = await loop.run_in_executor(
+                    None, self._run_foundry_script_sync, script, ctx.sandbox_id
+                )
+            except Exception as exc:
+                exc_str = str(exc)
+                if "OutputNotReexecutable" in exc_str or "AlreadyExecuted" in exc_str:
+                    log.info("Voucher index=%d already executed — trying next", output_index)
+                    last_detail = f"index={output_index} OutputNotReexecutable"
+                    continue
+                return AssertionResult(
+                    assertion_type="voucher_v2",
+                    passed=False,
+                    detail=f"executeOutput script failed: {exc_str[:400]}",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+
+            passed = "status: 1" in output.lower() or "transactionhash" in output.lower()
             return AssertionResult(
                 assertion_type="voucher_v2",
-                passed=False,
-                detail=f"executeOutput script failed: {exc}",
+                passed=passed,
+                expected="executeOutput tx status=1",
+                actual="output executed on-chain" if passed else "execution failed",
+                detail=(
+                    f"executeOutput(index={output_index}, raw={raw_data[:10]}…) "
+                    f"on CartesiDApp {app_addr[:10]}… — "
+                    f"{'SUCCESS' if passed else 'FAILED'}"
+                ),
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        passed = "status: 1" in output.lower() or "transactionhash" in output.lower()
+        # All vouchers were already executed
         return AssertionResult(
             assertion_type="voucher_v2",
-            passed=passed,
-            expected="executeOutput tx status=1",
-            actual="output executed on-chain" if passed else "execution failed",
-            detail=(
-                f"executeOutput(index={output_index}, raw={raw_data[:10]}…) "
-                f"on CartesiDApp {app_addr[:10]}… — "
-                f"{'SUCCESS' if passed else 'FAILED'}"
-            ),
+            passed=False,
+            detail=f"All {len(vouchers)} voucher(s) already executed ({last_detail})",
             duration_ms=int((time.monotonic() - t0) * 1000),
         )
 
@@ -406,7 +428,7 @@ class VoucherV2Executor(AssertionExecutor):
 
         return (
             f"set -e\n"
-            f"cast send --rpc-url {_ANVIL_RPC} --private-key {_DEPLOYER_KEY} \\\n"
+            f"cast send --rpc-url {_ANVIL_RPC} --gas-price 100gwei --private-key {_EXECUTE_OUT_KEY} \\\n"
             f"  {app_addr} \\\n"
             f"  'executeOutput(bytes,(uint64,bytes32[]))' \\\n"
             f"  {raw_data} \\\n"

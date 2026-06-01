@@ -468,7 +468,7 @@ class SandboxQueueConsumer:
                 await self._teardown(sandbox_id, run_id)
             await pool.release(sandbox_id)
 
-    async def _wait_for_tests(self, sandbox_id: str, run_id: str, timeout: int = 600):
+    async def _wait_for_tests(self, sandbox_id: str, run_id: str, timeout: int = 7200):
         for _ in range(timeout // 5):
             await asyncio.sleep(5)
             async with SessionLocal() as db:
@@ -481,20 +481,30 @@ class SandboxQueueConsumer:
                 )
                 dispatched = meta_row.scalar() or 0
 
-                remaining_row = await db.execute(
+                counts_row = await db.execute(
                     text("""
-                        SELECT COUNT(*) FROM tests.results
-                        WHERE sandbox_id = :sid AND status IN ('pending', 'running')
+                        SELECT
+                            COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS in_flight,
+                            COUNT(*) AS total_started
+                        FROM tests.results
+                        WHERE sandbox_id = :sid
                     """),
                     {"sid": sandbox_id},
                 )
-                remaining = remaining_row.scalar()
+                counts = counts_row.fetchone()
+                in_flight     = counts.in_flight     if counts else 0
+                total_started = counts.total_started if counts else 0
 
-            if dispatched > 0 and remaining == 0:
+            if dispatched > 0 and total_started >= dispatched and in_flight == 0:
                 log.info("All %d tests done for sandbox %s", dispatched, sandbox_id)
                 return
             elif dispatched == 0:
                 log.debug("Waiting for test dispatch to complete (sandbox=%s)", sandbox_id)
+            else:
+                log.debug(
+                    "Sandbox %s waiting: dispatched=%d started=%d in_flight=%d",
+                    sandbox_id, dispatched, total_started, in_flight,
+                )
 
         log.warning("Timeout waiting for tests on sandbox %s — tearing down anyway", sandbox_id)
 

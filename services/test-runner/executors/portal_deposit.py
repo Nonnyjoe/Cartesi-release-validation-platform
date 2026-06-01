@@ -45,6 +45,10 @@ _SENDER       = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 _ERC721_KEY    = "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
 _ERC721_SENDER = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
 
+# Account #5 — ERC20 direct/e2e portal tests (separate from account #0 to avoid nonce conflicts)
+_ERC20_E2E_KEY    = "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
+_ERC20_E2E_SENDER = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+
 # Account #8 — ERC1155 portal tests (separate from ERC20/ERC721 to avoid nonce conflicts)
 _ERC1155_KEY    = "0xdbda1821b80551c9d65939329250132c444d90ea74307f05f60ce6b0c942d0c8"
 _ERC1155_SENDER = "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
@@ -96,17 +100,44 @@ def _pad32(val: str) -> str:
     return val.lower().removeprefix("0x").zfill(64)
 
 
-def _abi_encode_deposit_ether(app_address: str) -> str:
+def _abi_encode_deposit_ether(app_address: str, exec_layer_data: str = "0x") -> str:
     """
     ABI-encode EtherPortal.depositEther(address _dapp, bytes calldata _execLayerData).
-    Selector: keccak256("depositEther(address,bytes)")[:4]
+    Selector: keccak256("depositEther(address,bytes)")[:4] = 0x938c054f
     """
-    # Pre-computed selector for depositEther(address,bytes)
     selector = "938c054f"
     addr   = _pad32(app_address)
     offset = _pad32("40")   # offset to bytes param = 64
-    length = _pad32("0")    # empty bytes
-    return "0x" + selector + addr + offset + length
+    data_bytes = bytes.fromhex(exec_layer_data.removeprefix("0x")) if exec_layer_data and exec_layer_data != "0x" else b""
+    length = _pad32(hex(len(data_bytes))[2:])
+    # Pad data to 32-byte boundary
+    padded = data_bytes + b"\x00" * ((32 - len(data_bytes) % 32) % 32)
+    return "0x" + selector + addr + offset + length + padded.hex()
+
+
+def _abi_encode_erc721_mint(to_addr: str, token_id: int) -> str:
+    """ABI-encode mint(address,uint256) calldata. Selector: 0x40c10f19"""
+    return "0x" + (
+        bytes.fromhex("40c10f19")
+        + bytes.fromhex(to_addr[2:]).rjust(32, b'\x00')
+        + token_id.to_bytes(32, 'big')
+    ).hex()
+
+
+def _abi_encode_erc721_deposit(token: str, app: str, token_id: int) -> str:
+    """
+    ABI-encode depositERC721Token(address,address,uint256,bytes,bytes)
+    with empty bytes for baseLayerData and execLayerData. Selector: 0x28911e83
+    """
+    head = (
+        bytes.fromhex(token[2:]).rjust(32, b'\x00')
+        + bytes.fromhex(app[2:]).rjust(32, b'\x00')
+        + token_id.to_bytes(32, 'big')
+        + (160).to_bytes(32, 'big')   # offset to bytes1 tail = 5*32
+        + (192).to_bytes(32, 'big')   # offset to bytes2 tail = 5*32 + 1*32
+    )
+    tail = (0).to_bytes(32, 'big') + (0).to_bytes(32, 'big')  # empty bytes lengths
+    return "0x" + (bytes.fromhex("28911e83") + head + tail).hex()
 
 
 def _abi_encode_erc1155_mint(to_addr: str, token_id: int, amount: int) -> str:
@@ -163,11 +194,13 @@ class PortalDepositExecutor(AssertionExecutor):
                 return await self._deposit_erc721(assertion, ctx, token_id, t0)
             elif token_type == "erc1155":
                 return await self._deposit_erc1155(assertion, ctx, token_id, amount, t0)
+            elif token_type == "erc1155_batch":
+                return await self._deposit_erc1155_batch(assertion, ctx, t0)
             else:
                 return AssertionResult(
                     assertion_type="portal_deposit",
                     passed=False,
-                    detail=f"Unknown token_type: {token_type!r} (expected ether|erc20|erc721|erc1155)",
+                    detail=f"Unknown token_type: {token_type!r} (expected ether|erc20|erc721|erc1155|erc1155_batch)",
                     duration_ms=int((time.monotonic() - t0) * 1000),
                 )
         except Exception as exc:
@@ -197,7 +230,8 @@ class PortalDepositExecutor(AssertionExecutor):
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        calldata   = _abi_encode_deposit_ether(app)
+        exec_layer_data = assertion.get("exec_layer_data", "0x")
+        calldata   = _abi_encode_deposit_ether(app, exec_layer_data)
         hex_amount = hex(amount)
 
         try:
@@ -246,11 +280,13 @@ class PortalDepositExecutor(AssertionExecutor):
 
     async def _deposit_erc20(self, assertion: dict, ctx: SandboxContext,
                               amount: int, t0: float) -> AssertionResult:
-        portal = ctx.erc20_portal_address
-        app    = ctx.app_address or "0x0000000000000000000000000000000000000001"
-        token  = ctx.erc20_token_address  # pre-deployed by provisioner (may be None)
+        portal   = ctx.erc20_portal_address
+        app      = ctx.app_address or "0x0000000000000000000000000000000000000001"
+        token    = ctx.erc20_token_address  # pre-deployed by provisioner (may be None)
+        use_alt  = assertion.get("use_alt_sender", False)
+        rpc_url  = ctx.anvil_rpc_url
 
-        code = await self._get_code(ctx.anvil_rpc_url, portal)
+        code = await self._get_code(rpc_url, portal)
         if code == "0x":
             return AssertionResult(
                 assertion_type="portal_deposit",
@@ -258,6 +294,28 @@ class PortalDepositExecutor(AssertionExecutor):
                 detail=f"ERC20Portal has no bytecode at {portal}",
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
+
+        # Direct path: use JSON-RPC directly to avoid cast nonce races on
+        # interval-mining Anvil (--block-time 1). Preferred when a pre-deployed
+        # token is available and the caller requests the alternative account.
+        if token and use_alt:
+            try:
+                detail = await self._deposit_erc20_direct(token, portal, app, amount, rpc_url)
+                return AssertionResult(
+                    assertion_type="portal_deposit",
+                    passed=True,
+                    expected="ERC20 deposit tx status=1",
+                    actual="deposit transaction confirmed",
+                    detail=detail,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+            except Exception as exc:
+                return AssertionResult(
+                    assertion_type="portal_deposit",
+                    passed=False,
+                    detail=f"ERC20 direct deposit failed: {exc}",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
 
         loop = asyncio.get_event_loop()
         if token:
@@ -294,6 +352,62 @@ class PortalDepositExecutor(AssertionExecutor):
             duration_ms=int((time.monotonic() - t0) * 1000),
         )
 
+    async def _deposit_erc20_direct(self, token: str, portal: str, app: str,
+                                     amount: int, rpc_url: str) -> str:
+        """
+        Perform ERC20 deposit via direct eth_sendTransaction calls using account #5.
+        Avoids cast nonce races when multiple ERC20 tests run on interval-mining Anvil.
+        """
+        async def send_and_wait(sender: str, to: str, data: str) -> None:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(rpc_url, json={
+                    "jsonrpc": "2.0",
+                    "method":  "eth_sendTransaction",
+                    "params":  [{"from": sender, "to": to, "data": data}],
+                    "id":      1,
+                })
+                result = resp.json()
+                if "error" in result:
+                    raise RuntimeError(f"eth_sendTransaction error: {result['error']}")
+                tx_hash = result["result"]
+            receipt = await self._wait_receipt(rpc_url, tx_hash)
+            if int(receipt.get("status", "0x0"), 16) != 1:
+                raise RuntimeError(f"Transaction reverted: {tx_hash}")
+
+        # mint(address,uint256): selector 0x40c10f19
+        # _SENDER (account #0) is the token owner and can mint to the alt sender
+        mint_data = "0x" + (
+            bytes.fromhex("40c10f19")
+            + bytes.fromhex(_ERC20_E2E_SENDER[2:]).rjust(32, b'\x00')
+            + amount.to_bytes(32, 'big')
+        ).hex()
+        await send_and_wait(_SENDER, token, mint_data)
+
+        # approve(address,uint256): selector 0x095ea7b3
+        approve_data = "0x" + (
+            bytes.fromhex("095ea7b3")
+            + bytes.fromhex(portal[2:]).rjust(32, b'\x00')
+            + amount.to_bytes(32, 'big')
+        ).hex()
+        await send_and_wait(_ERC20_E2E_SENDER, token, approve_data)
+
+        # depositERC20Tokens(address,address,uint256,bytes): selector 0x21425ee0
+        deposit_data = "0x" + (
+            bytes.fromhex("21425ee0")
+            + bytes.fromhex(token[2:]).rjust(32, b'\x00')
+            + bytes.fromhex(app[2:]).rjust(32, b'\x00')
+            + amount.to_bytes(32, 'big')
+            + (128).to_bytes(32, 'big')   # offset to execLayerData
+            + (0).to_bytes(32, 'big')     # length of execLayerData = 0
+        ).hex()
+        await send_and_wait(_ERC20_E2E_SENDER, portal, deposit_data)
+
+        return (
+            f"TestERC20 at {token[:12]}…  "
+            f"mint({amount}) → approve(ERC20Portal) → "
+            f"depositERC20Tokens(token, app={app[:10]}…, amount={amount})"
+        )
+
     # ── ERC721 deposit ─────────────────────────────────────────────────────────
 
     async def _deposit_erc721(self, assertion: dict, ctx: SandboxContext,
@@ -311,11 +425,33 @@ class PortalDepositExecutor(AssertionExecutor):
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        loop = asyncio.get_event_loop()
         if token:
-            script = self._build_erc721_deposit_script(token, portal, app, token_id)
-        else:
-            script = self._build_erc721_script(portal, app, token_id)
+            # Fast path: direct JSON-RPC (no cast gas estimation).
+            # eth_estimateGas fails when the token already exists (re-mint on
+            # same sandbox) or when the pending Anvil block is full. Using
+            # eth_sendTransaction directly bypasses this.
+            try:
+                detail = await self._deposit_erc721_direct(
+                    token, portal, app, token_id, ctx.anvil_rpc_url
+                )
+                return AssertionResult(
+                    assertion_type="portal_deposit",
+                    passed=True,
+                    expected="ERC721 deposit tx status=1",
+                    actual="deposit transaction confirmed",
+                    detail=detail,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+            except Exception as exc:
+                return AssertionResult(
+                    assertion_type="portal_deposit",
+                    passed=False,
+                    detail=f"ERC721 direct deposit failed: {exc}",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+
+        loop = asyncio.get_event_loop()
+        script = self._build_erc721_script(portal, app, token_id)
 
         try:
             output = await loop.run_in_executor(
@@ -329,7 +465,7 @@ class PortalDepositExecutor(AssertionExecutor):
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        token_label = token or self._parse_deployed(output) or "?"
+        token_label = self._parse_deployed(output) or "?"
         return AssertionResult(
             assertion_type="portal_deposit",
             passed=True,
@@ -415,6 +551,128 @@ class PortalDepositExecutor(AssertionExecutor):
             duration_ms=int((time.monotonic() - t0) * 1000),
         )
 
+    async def _deposit_erc1155_batch(self, assertion: dict, ctx: SandboxContext,
+                                      t0: float) -> AssertionResult:
+        """
+        Simulate an ERC1155 batch deposit by making multiple sequential single deposits
+        via ERC1155SinglePortal. Used when token_type: erc1155_batch is specified.
+        token_ids and amounts must be parallel lists.
+        """
+        portal   = ctx.erc1155_portal_address
+        app      = ctx.app_address or "0x0000000000000000000000000000000000000001"
+        token    = ctx.erc1155_token_address
+        rpc_url  = ctx.anvil_rpc_url
+        token_ids = [int(x) for x in assertion.get("token_ids", [1, 2])]
+        amounts   = [int(x) for x in assertion.get("amounts", [100, 100])]
+        if len(token_ids) != len(amounts):
+            return AssertionResult(
+                assertion_type="portal_deposit",
+                passed=False,
+                detail="erc1155_batch: token_ids and amounts must have the same length",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+
+        code = await self._get_code(rpc_url, portal)
+        if code == "0x":
+            return AssertionResult(
+                assertion_type="portal_deposit",
+                passed=False,
+                detail=f"ERC1155SinglePortal has no bytecode at {portal}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+
+        if not token:
+            return AssertionResult(
+                assertion_type="portal_deposit",
+                passed=False,
+                detail="erc1155_batch requires a pre-deployed ERC1155 token (erc1155_token_address not set in context)",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+
+        try:
+            async def send_and_wait(to: str, data: str) -> None:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(rpc_url, json={
+                        "jsonrpc": "2.0",
+                        "method":  "eth_sendTransaction",
+                        "params":  [{"from": _ERC1155_SENDER, "to": to, "data": data}],
+                        "id":      1,
+                    })
+                    result = resp.json()
+                    if "error" in result:
+                        raise RuntimeError(f"eth_sendTransaction error: {result['error']}")
+                    tx_hash = result["result"]
+                receipt = await self._wait_receipt(rpc_url, tx_hash)
+                if int(receipt.get("status", "0x0"), 16) != 1:
+                    raise RuntimeError(f"Transaction reverted: {tx_hash}")
+
+            # Mint all token IDs and set approval once
+            for tid, amt in zip(token_ids, amounts):
+                await send_and_wait(token, _abi_encode_erc1155_mint(_ERC1155_SENDER, tid, amt))
+            await send_and_wait(token, _abi_encode_set_approval_for_all(portal, True))
+            # Deposit each token ID separately via ERC1155SinglePortal
+            for tid, amt in zip(token_ids, amounts):
+                await send_and_wait(portal, _abi_encode_erc1155_deposit(token, app, tid, amt))
+
+            return AssertionResult(
+                assertion_type="portal_deposit",
+                passed=True,
+                expected=f"ERC1155 batch deposit ({len(token_ids)} tokens) via SinglePortal",
+                actual="all deposits confirmed",
+                detail=(
+                    f"Deposited {len(token_ids)} token IDs via ERC1155SinglePortal: "
+                    + ", ".join(f"id={t}×{a}" for t, a in zip(token_ids, amounts))
+                ),
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+        except Exception as exc:
+            return AssertionResult(
+                assertion_type="portal_deposit",
+                passed=False,
+                detail=f"erc1155_batch deposit failed: {exc}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
+
+    async def _deposit_erc721_direct(self, token: str, portal: str, app: str,
+                                      token_id: int, rpc_url: str) -> str:
+        """
+        Perform ERC721 deposit via direct eth_sendTransaction calls (no cast).
+        Bypasses eth_estimateGas failures that occur when the pending Anvil block
+        is full. Uses a timestamp-derived token ID to avoid re-minting the same
+        token ID on repeat runs on the same sandbox (each token ID is unique to
+        one owner and gets transferred to the portal on deposit).
+        Uses unlocked Anvil account #3 (_ERC721_SENDER).
+        """
+        # Use a unique effective token ID so the same sandbox can run this test
+        # multiple times without hitting "token already owned by portal" errors.
+        effective_id = token_id + int(time.monotonic() * 1000) % (10 ** 9) * 1000
+
+        async def send_and_wait(to: str, data: str) -> None:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(rpc_url, json={
+                    "jsonrpc": "2.0",
+                    "method":  "eth_sendTransaction",
+                    "params":  [{"from": _ERC721_SENDER, "to": to, "data": data}],
+                    "id":      1,
+                })
+                result = resp.json()
+                if "error" in result:
+                    raise RuntimeError(f"eth_sendTransaction error: {result['error']}")
+                tx_hash = result["result"]
+            receipt = await self._wait_receipt(rpc_url, tx_hash)
+            if int(receipt.get("status", "0x0"), 16) != 1:
+                raise RuntimeError(f"Transaction reverted: {tx_hash}")
+
+        await send_and_wait(token, _abi_encode_erc721_mint(_ERC721_SENDER, effective_id))
+        await send_and_wait(token, _abi_encode_set_approval_for_all(portal, True))
+        await send_and_wait(portal, _abi_encode_erc721_deposit(token, app, effective_id))
+
+        return (
+            f"TestERC721 at {token[:12]}…  "
+            f"mint(id={effective_id}) → setApprovalForAll(ERC721Portal) → "
+            f"depositERC721Token(token, app={app[:10]}…, id={effective_id})"
+        )
+
     async def _deposit_erc1155_direct(self, token: str, portal: str, app: str,
                                        token_id: int, amount: int, rpc_url: str) -> str:
         """
@@ -453,13 +711,14 @@ class PortalDepositExecutor(AssertionExecutor):
 
     def _build_erc20_deposit_script(self, token: str, portal: str, app: str, amount: int) -> str:
         """mint → approve → depositERC20Tokens using an already-deployed token contract."""
+        _GAS = "--gas-price 100gwei"
         return (
             f"set -e\n"
-            f"cast send --private-key {_DEPLOYER_KEY} --rpc-url {_ANVIL_RPC} "
+            f"cast send --private-key {_DEPLOYER_KEY} {_GAS} --rpc-url {_ANVIL_RPC} "
             f"  {token} 'mint(address,uint256)' {_SENDER} {amount} 2>&1\n"
-            f"cast send --private-key {_DEPLOYER_KEY} --rpc-url {_ANVIL_RPC} "
+            f"cast send --private-key {_DEPLOYER_KEY} {_GAS} --rpc-url {_ANVIL_RPC} "
             f"  {token} 'approve(address,uint256)' {portal} {amount} 2>&1\n"
-            f"cast send --private-key {_DEPLOYER_KEY} --rpc-url {_ANVIL_RPC} "
+            f"cast send --private-key {_DEPLOYER_KEY} {_GAS} --rpc-url {_ANVIL_RPC} "
             f"  {portal} 'depositERC20Tokens(address,address,uint256,bytes)' "
             f"  {token} {app} {amount} 0x 2>&1\n"
         )

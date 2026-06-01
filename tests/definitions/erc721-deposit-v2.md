@@ -4,6 +4,7 @@ name: ERC721 Portal Deposit (v2.x)
 version: 1
 min_node_major_version: 2
 tags: [portal, deposit, erc721, nft, assets, v2]
+csv_ids: ["3.9"]
 release_introduced: v2.0.0
 component: advancer
 priority: high

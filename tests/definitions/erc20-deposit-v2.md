@@ -4,6 +4,7 @@ name: ERC20 Portal Deposit (v2.x)
 version: 1
 min_node_major_version: 2
 tags: [portal, deposit, erc20, assets, v2]
+csv_ids: ["3.6"]
 release_introduced: v2.0.0
 component: advancer
 priority: high

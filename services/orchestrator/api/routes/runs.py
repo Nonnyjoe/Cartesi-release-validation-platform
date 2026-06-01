@@ -32,6 +32,10 @@ class TriggerRunRequest(BaseModel):
     release_tag:  str
     image_tag:    str
     suite_ids:    Optional[List[str]] = None
+    # Tag-based suite filter: e.g. ["restart"] or ["chaos"] — runs only tests
+    # whose `tags` array contains at least one of these values.
+    # Use this instead of suite_ids for group-isolated restart/chaos suites.
+    run_tags:     Optional[List[str]] = None
     priority:     int = 5              # 5=user, 9=auto, 1=scheduled
     triggered_by: str = "user"        # must be: github_release | user | scheduled
     triggered_by_user: Optional[str] = None
@@ -93,6 +97,11 @@ async def trigger_run(
         app_name       = app.name
         app_github_url = app.github_url
 
+    # Build initial metadata — store run_tags for tag-based suite filtering
+    run_meta = {}
+    if body.run_tags:
+        run_meta["tags_filter"] = body.run_tags
+
     run = Run(
         id=uuid.uuid4(),
         release_tag=body.release_tag,
@@ -104,6 +113,7 @@ async def trigger_run(
         triggered_by_user=body.triggered_by_user,
         queued_at=datetime.now(tz=timezone.utc),
         app_id=resolved_app_id,
+        metadata=run_meta if run_meta else None,
     )
     db.add(run)
 
@@ -115,6 +125,7 @@ async def trigger_run(
             "priority":    body.priority,
             "app_id":      str(resolved_app_id) if resolved_app_id else None,
             "app_name":    app_name,
+            "run_tags":    body.run_tags,
         },
     )
     db.add(event)

@@ -38,7 +38,7 @@ def _abi_encode_add_input(app_address: str, payload_hex: str) -> str:
     addr = app_address.lower().removeprefix("0x").zfill(64)
     offset = "0000000000000000000000000000000000000000000000000000000000000040"
 
-    raw = payload_hex.lower().removeprefix("0x")
+    raw = payload_hex.lower().removeprefix("0x").replace(" ", "")
     length_val = len(raw) // 2  # byte length
     length_enc = hex(length_val)[2:].zfill(64)
     # Pad payload to multiple of 32 bytes
@@ -52,7 +52,13 @@ class ChainTxExecutor(AssertionExecutor):
     assertion_type = "chain_tx"
 
     async def execute(self, assertion: dict, ctx: SandboxContext) -> AssertionResult:
-        payload  = assertion.get("payload", "0xdeadbeef")
+        raw_payload    = assertion.get("payload", "0xdeadbeef")
+        # Accept plain JSON/string payloads — auto-encode to hex if not 0x-prefixed
+        if isinstance(raw_payload, str) and not raw_payload.startswith("0x"):
+            payload = "0x" + raw_payload.encode("utf-8").hex()
+        else:
+            payload = raw_payload
+        expect_revert  = assertion.get("expect_revert", False)
         # For v2.x use deployed app address from context; fall back to assertion value
         app_addr = assertion.get("app_address", "")
         if ctx.node_major_version >= 2:
@@ -63,7 +69,7 @@ class ChainTxExecutor(AssertionExecutor):
         t0 = time.monotonic()
 
         if ctx.node_major_version >= 2:
-            return await self._submit_v2(payload, app_addr, ctx, t0)
+            return await self._submit_v2(payload, app_addr, ctx, t0, expect_revert=expect_revert)
         else:
             return await self._submit_v1(payload, ctx, t0)
 
@@ -89,7 +95,8 @@ class ChainTxExecutor(AssertionExecutor):
                                    duration_ms=int((time.monotonic() - t0) * 1000))
 
     async def _submit_v2(self, payload: str, app_addr: str,
-                         ctx: SandboxContext, t0: float) -> AssertionResult:
+                         ctx: SandboxContext, t0: float,
+                         expect_revert: bool = False) -> AssertionResult:
         """
         Submit an input by calling InputBox.addInput on Anvil via eth_sendTransaction.
         Anvil's unlocked accounts allow unsigned transactions from _SENDER.
@@ -127,11 +134,16 @@ class ChainTxExecutor(AssertionExecutor):
                     receipt = receipt_resp.json().get("result")
                     if receipt:
                         status = int(receipt.get("status", "0x0"), 16)
-                        passed = (status == 1)
+                        if expect_revert:
+                            passed = (status == 0)
+                            exp_str = "tx reverted (status=0)"
+                        else:
+                            passed = (status == 1)
+                            exp_str = "tx status=1"
                         return AssertionResult(
                             assertion_type="chain_tx",
                             passed=passed,
-                            expected="tx status=1",
+                            expected=exp_str,
                             actual=f"tx status={status}",
                             detail=(
                                 f"InputBox.addInput(app={app_addr[:10]}…, "

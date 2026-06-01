@@ -84,8 +84,8 @@ class TestResultConsumer:
             finished   = row_c.finished
             in_flight  = row_c.in_flight
 
-            if in_flight > 0 or finished < dispatched:
-                return  # Still waiting for tests to start or complete
+            if dispatched == 0 or in_flight > 0 or finished < dispatched:
+                return  # dispatched_count not yet written, or tests still running/pending
 
             # Compute pass rate
             stats = await db.execute(

@@ -17,6 +17,12 @@ from executors.voucher import VoucherExecutor
 from executors.jsonrpc import JsonRpcExecutor
 from executors.portal_deposit import PortalDepositExecutor
 from executors.voucher_v2 import VoucherV2Executor
+from executors.health_check import HealthCheckExecutor
+from executors.inspect_query import InspectQueryExecutor
+from executors.notice_check import NoticeCheckExecutor
+from executors.cli_command import CliCommandExecutor
+from executors.service_restart import ServiceRestartExecutor
+from executors.metrics_check import MetricsCheckExecutor
 
 log = logging.getLogger("test-runner.executor")
 
@@ -31,6 +37,12 @@ _EXECUTORS: dict[str, AssertionExecutor] = {
         JsonRpcExecutor(),
         PortalDepositExecutor(),
         VoucherV2Executor(),
+        HealthCheckExecutor(),
+        InspectQueryExecutor(),
+        NoticeCheckExecutor(),
+        CliCommandExecutor(),
+        ServiceRestartExecutor(),
+        MetricsCheckExecutor(),
     ]
 }
 

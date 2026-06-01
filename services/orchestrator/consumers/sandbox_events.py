@@ -211,6 +211,7 @@ class SandboxEventConsumer:
                 text("""
                     SELECT r.suite_ids,
                            r.app_address,
+                           r.metadata,
                            COALESCE(rc.node_major_version, 1) AS node_major_version
                     FROM orchestrator.runs r
                     LEFT JOIN github.release_catalog rc ON rc.tag = r.release_tag
@@ -221,26 +222,46 @@ class SandboxEventConsumer:
             run = run_row.fetchone()
             suite_ids          = run.suite_ids  if run else None
             node_major_version = run.node_major_version if run else 1
+            run_metadata       = run.metadata or {} if run else {}
+            tags_filter        = run_metadata.get("tags_filter")  # e.g. ["restart"]
             # app_address is set by sandbox_queue consumer after deploy; also forwarded
             # from sandbox_msg so we always have the most up-to-date value.
             app_address = (sandbox_msg.get("app_address")
                            or (run.app_address if run else None))
 
-            all_rows = await db.execute(
-                text("""
-                    SELECT id, slug, version FROM tests.definitions
-                    WHERE is_active = true
-                    AND min_node_major_version = :node_version
-                """),
-                {"node_version": node_major_version},
-            )
+            # Build the definitions query — tag-based filter applied in SQL for efficiency
+            if tags_filter:
+                # Filter: definition tags array overlaps with any of the requested tags
+                all_rows = await db.execute(
+                    text("""
+                        SELECT id, slug, version FROM tests.definitions
+                        WHERE is_active = true
+                        AND min_node_major_version = :node_version
+                        AND tags && CAST(:tag_filter AS text[])
+                    """),
+                    {"node_version": node_major_version, "tag_filter": tags_filter},
+                )
+            else:
+                all_rows = await db.execute(
+                    text("""
+                        SELECT id, slug, version FROM tests.definitions
+                        WHERE is_active = true
+                        AND min_node_major_version = :node_version
+                        AND NOT (tags && ARRAY['standalone']::text[])
+                    """),
+                    {"node_version": node_major_version},
+                )
             all_definitions = all_rows.fetchall()
 
         if suite_ids:
             suite_set   = {str(s) for s in suite_ids}
             definitions = [d for d in all_definitions if str(d.id) in suite_set]
-            log.info("Suite filter: %d/%d definitions selected for run %s",
+            log.info("Suite filter (UUID): %d/%d definitions selected for run %s",
                      len(definitions), len(all_definitions), run_id)
+        elif tags_filter:
+            definitions = all_definitions
+            log.info("Tag filter %s: %d definitions selected for run %s",
+                     tags_filter, len(definitions), run_id)
         else:
             definitions = all_definitions
 

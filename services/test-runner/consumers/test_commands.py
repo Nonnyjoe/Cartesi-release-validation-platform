@@ -236,7 +236,7 @@ class TestCommandConsumer:
                 {
                     "status": outcome["status"],
                     "dur":    outcome["duration_ms"],
-                    "ar":     json.dumps(outcome["assertion_results"]),
+                    "ar":     json.dumps(outcome["assertion_results"]).replace('\\u0000', ''),
                     "logs":   None,
                     "err":    outcome["error_message"],
                     "ts":     completed_at,

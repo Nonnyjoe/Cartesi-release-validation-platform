@@ -220,16 +220,27 @@ build-base:
 	docker build -t cartesi-rvp-sandbox:base ./sandbox-base
 
 build-test-app:
-	@echo "Building Cartesi test application (echo dapp)..."
+	@echo "Building Cartesi test application (student-tracker)..."
 	@command -v cartesi >/dev/null 2>&1 || { echo "  ERROR: cartesi CLI not found. Install with: npm install -g @cartesi/cli@2.0.0-alpha.27"; exit 1; }
-	cd test-app && cartesi build
+	cd ../student-tracker && cartesi build
 	@echo "Loading machine snapshot into Docker volume rvp-test-snapshot..."
+	docker volume create rvp-test-snapshot
+	docker run --rm \
+		-v $(shell cd .. && pwd)/student-tracker/.cartesi/image:/src:ro \
+		-v rvp-test-snapshot:/dst \
+		alpine sh -c "cp -r /src/. /dst/ && echo 'Snapshot loaded.'"
+	@echo "Done — rvp-test-snapshot is ready for v2.x sandboxes."
+
+build-test-app-echo:
+	@echo "Building minimal echo dapp (fallback)..."
+	@command -v cartesi >/dev/null 2>&1 || { echo "  ERROR: cartesi CLI not found."; exit 1; }
+	cd test-app && cartesi build
 	docker volume create rvp-test-snapshot
 	docker run --rm \
 		-v $(PWD)/test-app/.cartesi/image:/src:ro \
 		-v rvp-test-snapshot:/dst \
 		alpine sh -c "cp -r /src/. /dst/ && echo 'Snapshot loaded.'"
-	@echo "Done — rvp-test-snapshot is ready for v2.x sandboxes."
+	@echo "Done — rvp-test-snapshot loaded with echo dapp."
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
