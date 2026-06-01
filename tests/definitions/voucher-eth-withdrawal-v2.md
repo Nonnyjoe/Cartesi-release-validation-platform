@@ -19,10 +19,10 @@ assertions:
     amount: 1000000000000000000
   - type: voucher_v2
     mode: generate
+    token_type: ether
     expect_count: 1
     poll_interval: 3
     poll_timeout: 120
-    trigger_payload: "withdraw_ether"
 ---
 
 ## Description

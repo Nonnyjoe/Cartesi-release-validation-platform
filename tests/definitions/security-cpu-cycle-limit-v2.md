@@ -17,8 +17,8 @@ assertions:
     payload: "0x7b22616374696f6e223a22696e66696e6974655f6c6f6f70227d"
     comment: '{"action":"infinite_loop"} — triggers CPU cycle limit'
   - type: log_contains
-    service: advancer
-    text: "cycle"
+    component: advancer
+    pattern: "cycle"
     timeout_seconds: 60
 ---
 

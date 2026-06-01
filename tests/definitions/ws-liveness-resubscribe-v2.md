@@ -20,8 +20,8 @@ assertions:
     path: /readyz
     expect_status: 200
   - type: log_contains
-    service: evm-reader
-    text: "resubscrib"
+    component: evm-reader
+    pattern: "resubscrib"
     timeout_seconds: 150
     comment: "verify resubscribe log appears after WS liveness timeout"
 ---

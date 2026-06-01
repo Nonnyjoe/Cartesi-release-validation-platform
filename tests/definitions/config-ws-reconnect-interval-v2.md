@@ -20,8 +20,8 @@ assertions:
     path: /readyz
     expect_status: 200
   - type: log_contains
-    service: evm-reader
-    text: "reconnect"
+    component: evm-reader
+    pattern: "reconnect"
     timeout_seconds: 60
     comment: "after a brief WS disruption, reconnect should occur at 2s interval"
 ---

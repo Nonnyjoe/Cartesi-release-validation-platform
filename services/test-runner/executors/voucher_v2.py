@@ -53,6 +53,28 @@ _SETUP_ACCOUNTS = {
     ),
 }
 
+# Dedicated accounts for non-ERC20 token type voucher tests.
+# Each uses a unique account to avoid nonce conflicts with portal_deposit and erc20 tests.
+_ETHER_VOUCHER_ACCT   = (
+    "0x976EA74026E726554dB657fA54763abd0C3a0aa9",   # account #6
+    "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
+)
+_ERC721_VOUCHER_ACCT  = (
+    "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955",   # account #7
+    "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
+)
+_ERC1155_VOUCHER_ACCT = (
+    "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720",   # account #9
+    "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
+)
+
+# ERC721 token ID used by voucher_v2 ether/erc721/erc1155 setup scripts.
+# Chosen to avoid collision with portal_deposit tests that use IDs 1–9.
+_V2_ERC721_TOKEN_ID  = 20
+_V2_ERC1155_TOKEN_ID = 5
+_V2_ERC1155_AMOUNT   = 50
+_V2_ETHER_AMOUNT     = 10 ** 18  # 1 ETH in wei
+
 # Epoch statuses that mean the Merkle proof is available for executeOutput.
 _CLAIMED_STATUSES = {"CLAIM_ACCEPTED", "SETTLED", "CLAIM_SUBMITTED"}
 
@@ -65,6 +87,7 @@ class VoucherV2Executor(AssertionExecutor):
 
     async def execute(self, assertion: dict, ctx: SandboxContext) -> AssertionResult:
         mode          = assertion.get("mode", "generate").lower()
+        token_type    = assertion.get("token_type", "erc20").lower()
         expect_count  = int(assertion.get("expect_count", 1))
         poll_interval = float(assertion.get("poll_interval", 3))
         default_to    = 90 if mode == "generate" else 180
@@ -74,7 +97,8 @@ class VoucherV2Executor(AssertionExecutor):
         try:
             if mode == "generate":
                 return await self._check_generation(ctx, expect_count,
-                                                     poll_interval, poll_timeout, t0)
+                                                     poll_interval, poll_timeout, t0,
+                                                     token_type=token_type)
             elif mode == "execute":
                 return await self._execute_voucher(ctx, expect_count,
                                                     poll_interval, poll_timeout, t0)
@@ -148,21 +172,156 @@ class VoucherV2Executor(AssertionExecutor):
 
         return script
 
-    async def _trigger_voucher(self, ctx: SandboxContext, mode: str = "generate") -> None:
-        if not ctx.erc20_token_address:
-            raise RuntimeError(
-                "ctx.erc20_token_address is not set — cannot trigger voucher. "
-                "Ensure the sandbox provisioner deployed test tokens."
-            )
+    def _build_ether_setup_script(self, ctx: SandboxContext) -> str:
+        """
+        Deposit 1 ETH via EtherPortal (auto-registers sender as student),
+        then send a JSON withdraw action from the same account.
+        """
+        portal   = ctx.ether_portal_address
+        app      = ctx.app_address
+        inputbox = ctx.inputbox_address
+        amount   = _V2_ETHER_AMOUNT
+
+        sender_addr, sender_key = _ETHER_VOUCHER_ACCT
+
+        withdraw_json = _json.dumps({
+            "action":     "withdraw",
+            "asset_type": "ether",
+            "amount":     str(amount),
+        }, separators=(",", ":"))
+        withdraw_hex = "0x" + withdraw_json.encode().hex()
+
+        _GAS = "--gas-price 100gwei"
+        return (
+            f"set -e\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {portal} 'depositEther(address,bytes)' {app} 0x "
+            f"  --value {amount} 2>&1\n"
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {inputbox} 'addInput(address,bytes)' {app} {withdraw_hex} 2>&1\n"
+        )
+
+    def _build_erc721_setup_script(self, ctx: SandboxContext) -> str:
+        """
+        Mint an ERC721 token to the sender, deposit via ERC721Portal,
+        then send a JSON withdraw action from the same account.
+        Token ID _V2_ERC721_TOKEN_ID (20) avoids collisions with portal_deposit tests.
+        """
+        token    = ctx.erc721_token_address
+        portal   = ctx.erc721_portal_address
+        app      = ctx.app_address
+        inputbox = ctx.inputbox_address
+        token_id = _V2_ERC721_TOKEN_ID
+
+        sender_addr, sender_key = _ERC721_VOUCHER_ACCT
+
+        # Normalise token_id to full 32-byte hex the way the app stores it
+        token_id_hex = "0x" + hex(token_id)[2:].zfill(64)
+        withdraw_json = _json.dumps({
+            "action":     "withdraw",
+            "asset_type": "erc721",
+            "token":      token,
+            "token_id":   token_id_hex,
+        }, separators=(",", ":"))
+        withdraw_hex = "0x" + withdraw_json.encode().hex()
+
+        _GAS = "--gas-price 100gwei"
+        return (
+            f"set -e\n"
+            # Mint using deployer key (contract owner)
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {_DEPLOYER_KEY} \\\n"
+            f"  {token} 'mint(address,uint256)' {sender_addr} {token_id} 2>&1\n"
+            # Approve portal from sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {token} 'setApprovalForAll(address,bool)' {portal} true 2>&1\n"
+            # Deposit ERC721 via portal from sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {portal} 'depositERC721Token(address,address,uint256,bytes,bytes)' \\\n"
+            f"  {token} {app} {token_id} 0x 0x 2>&1\n"
+            # Submit withdraw action from same sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {inputbox} 'addInput(address,bytes)' {app} {withdraw_hex} 2>&1\n"
+        )
+
+    def _build_erc1155_setup_script(self, ctx: SandboxContext) -> str:
+        """
+        Mint ERC1155 tokens to sender, deposit via ERC1155SinglePortal,
+        then send a JSON withdraw action from the same account.
+        Token ID _V2_ERC1155_TOKEN_ID (5) avoids collisions with portal_deposit tests.
+        Note: student-tracker does not support batch ERC1155 withdrawal; erc1155_batch
+        token_type uses single withdrawal after a single-token deposit.
+        """
+        token    = ctx.erc1155_token_address
+        portal   = ctx.erc1155_portal_address
+        app      = ctx.app_address
+        inputbox = ctx.inputbox_address
+        token_id = _V2_ERC1155_TOKEN_ID
+        amount   = _V2_ERC1155_AMOUNT
+
+        sender_addr, sender_key = _ERC1155_VOUCHER_ACCT
+
+        token_id_hex = "0x" + hex(token_id)[2:].zfill(64)
+        withdraw_json = _json.dumps({
+            "action":     "withdraw",
+            "asset_type": "erc1155",
+            "token":      token,
+            "token_id":   token_id_hex,
+            "amount":     str(amount),
+        }, separators=(",", ":"))
+        withdraw_hex = "0x" + withdraw_json.encode().hex()
+
+        _GAS = "--gas-price 100gwei"
+        return (
+            f"set -e\n"
+            # Mint using deployer key (contract owner)
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {_DEPLOYER_KEY} \\\n"
+            f"  {token} 'mint(address,uint256,uint256,bytes)' "
+            f"  {sender_addr} {token_id} {amount} 0x 2>&1\n"
+            # Approve portal from sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {token} 'setApprovalForAll(address,bool)' {portal} true 2>&1\n"
+            # Deposit via ERC1155 single portal from sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {portal} 'depositSingleERC1155Token(address,address,uint256,uint256,bytes,bytes)' \\\n"
+            f"  {token} {app} {token_id} {amount} 0x 0x 2>&1\n"
+            # Submit withdraw action from same sender
+            f"cast send --rpc-url {_ANVIL_RPC} {_GAS} --private-key {sender_key} \\\n"
+            f"  {inputbox} 'addInput(address,bytes)' {app} {withdraw_hex} 2>&1\n"
+        )
+
+    async def _trigger_voucher(
+        self, ctx: SandboxContext, mode: str = "generate", token_type: str = "erc20"
+    ) -> None:
         if not ctx.app_address:
             raise RuntimeError("ctx.app_address is not set — cannot trigger voucher")
 
-        script = self._build_setup_script(ctx, mode)
+        if token_type == "ether":
+            if not ctx.ether_portal_address:
+                raise RuntimeError("ctx.ether_portal_address not set")
+            script = self._build_ether_setup_script(ctx)
+        elif token_type == "erc721":
+            if not ctx.erc721_token_address or not ctx.erc721_portal_address:
+                raise RuntimeError("ctx.erc721_token_address / erc721_portal_address not set")
+            script = self._build_erc721_setup_script(ctx)
+        elif token_type in ("erc1155", "erc1155_batch"):
+            if not ctx.erc1155_token_address or not ctx.erc1155_portal_address:
+                raise RuntimeError("ctx.erc1155_token_address / erc1155_portal_address not set")
+            script = self._build_erc1155_setup_script(ctx)
+        else:
+            # Default: erc20
+            if not ctx.erc20_token_address:
+                raise RuntimeError(
+                    "ctx.erc20_token_address is not set — cannot trigger ERC20 voucher. "
+                    "Ensure the sandbox provisioner deployed test tokens."
+                )
+            script = self._build_setup_script(ctx, mode)
+
         loop   = asyncio.get_event_loop()
         output = await loop.run_in_executor(
             None, self._run_foundry_script_sync, script, ctx.sandbox_id
         )
-        log.info("Voucher setup complete for sandbox %s (mode=%s)", ctx.sandbox_id[:8], mode)
+        log.info("Voucher setup complete for sandbox %s (mode=%s token_type=%s)",
+                 ctx.sandbox_id[:8], mode, token_type)
         log.info("Setup script output (last 600):\n%s", output[-600:])
 
     # ── Generate mode ──────────────────────────────────────────────────────────
@@ -174,9 +333,10 @@ class VoucherV2Executor(AssertionExecutor):
         poll_interval: float,
         timeout: float,
         t0: float,
+        token_type: str = "erc20",
     ) -> AssertionResult:
         try:
-            await self._trigger_voucher(ctx, mode="generate")
+            await self._trigger_voucher(ctx, mode="generate", token_type=token_type)
         except Exception as exc:
             return AssertionResult(
                 assertion_type="voucher_v2",

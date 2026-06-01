@@ -20,8 +20,8 @@ assertions:
     use_app_address: true
     expect_count: 1
   - type: log_contains
-    service: evm-reader
-    text: "reorg"
+    component: evm-reader
+    pattern: "reorg"
     timeout_seconds: 60
     comment: "evm-reader must detect and handle the chain reorganization"
 ---

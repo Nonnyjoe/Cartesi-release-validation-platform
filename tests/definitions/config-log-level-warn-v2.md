@@ -18,12 +18,12 @@ assertions:
   - type: chain_tx
     payload: "0x7b22616374696f6e223a2270696e67227d"
   - type: log_contains
-    service: advancer
-    text: "WARN"
+    component: advancer
+    pattern: "WARN"
     timeout_seconds: 30
   - type: log_contains
-    service: advancer
-    text: "INFO"
+    component: advancer
+    pattern: "INFO"
     timeout_seconds: 10
     expect_absent: true
 ---

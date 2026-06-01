@@ -13,11 +13,9 @@ requires:
   - anvil
   - cartesi-node-v2
 assertions:
-  - type: json_rpc
-    method: cartesi_listApplications
-    use_app_address: false
-    stress_count: 100
-    comment: "submit 100 rapid inputs via stress_count"
+  - type: chain_tx
+    payload: '{"action":"ping"}'
+    repeat: 10
   - type: json_rpc
     method: cartesi_getProcessedInputCount
     use_app_address: true

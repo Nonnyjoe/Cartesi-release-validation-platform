@@ -17,10 +17,9 @@ assertions:
   - type: portal_deposit
     token_type: ether
     amount: 1000000000000000000
-  - type: chain_tx
-    payload: '{"action":"withdraw","asset_type":"ether"}'
   - type: voucher_v2
     mode: generate
+    token_type: ether
     expect_count: 1
     poll_interval: 3
     poll_timeout: 120

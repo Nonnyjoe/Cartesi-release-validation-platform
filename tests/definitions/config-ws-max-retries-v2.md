@@ -20,8 +20,8 @@ assertions:
     wait_healthy: false
     comment: "stopping anvil forces a WS reconnect attempt"
   - type: log_contains
-    service: evm-reader
-    text: "max retries"
+    component: evm-reader
+    pattern: "max retries"
     timeout_seconds: 60
 ---
 

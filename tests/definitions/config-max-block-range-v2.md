@@ -22,8 +22,8 @@ assertions:
     use_app_address: true
     expect_count: 1
   - type: log_contains
-    service: evm-reader
-    text: "range"
+    component: evm-reader
+    pattern: "range"
     timeout_seconds: 30
 ---
 

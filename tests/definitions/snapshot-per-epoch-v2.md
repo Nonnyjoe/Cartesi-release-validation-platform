@@ -22,8 +22,8 @@ assertions:
     use_app_address: true
     expect_count: 1
   - type: log_contains
-    service: advancer
-    text: "snapshot"
+    component: advancer
+    pattern: "snapshot"
     timeout_seconds: 60
 ---
 

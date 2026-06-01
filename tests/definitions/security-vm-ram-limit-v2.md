@@ -17,8 +17,8 @@ assertions:
     payload: "0x7b22616374696f6e223a2265786861757374535f72616d227d"
     comment: '{"action":"exhaust_ram"} — triggers VM RAM exhaustion'
   - type: log_contains
-    service: advancer
-    text: "exception"
+    component: advancer
+    pattern: "exception"
     timeout_seconds: 60
 ---
 

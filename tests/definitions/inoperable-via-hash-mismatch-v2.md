@@ -14,8 +14,8 @@ requires:
   - cartesi-node-v2
 assertions:
   - type: log_contains
-    service: advancer
-    text: "INOPERABLE"
+    component: advancer
+    pattern: "INOPERABLE"
     comment: "verify INOPERABLE state appears in logs when hash check fails"
 ---
 

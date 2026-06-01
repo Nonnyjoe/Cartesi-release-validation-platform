@@ -24,8 +24,8 @@ assertions:
     wait_healthy: true
     timeout: 120
   - type: log_contains
-    service: evm-reader
-    text: "synced"
+    component: evm-reader
+    pattern: "synced"
     timeout_seconds: 120
 ---
 

@@ -14,8 +14,8 @@ env_overrides:
 requires: []
 assertions:
   - type: log_contains
-    service: advancer
-    text: "database"
+    component: advancer
+    pattern: "database"
     timeout_seconds: 30
     comment: "advancer should fail fast with DB connection error"
 ---

@@ -20,8 +20,8 @@ assertions:
     use_app_address: true
     expect_count: 1
   - type: log_contains
-    service: claimer
-    text: "claim"
+    component: claimer
+    pattern: "claim"
     timeout_seconds: 120
 ---
 

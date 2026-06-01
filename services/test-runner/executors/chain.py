@@ -59,6 +59,7 @@ class ChainTxExecutor(AssertionExecutor):
         else:
             payload = raw_payload
         expect_revert  = assertion.get("expect_revert", False)
+        repeat         = max(1, int(assertion.get("repeat", 1)))
         # For v2.x use deployed app address from context; fall back to assertion value
         app_addr = assertion.get("app_address", "")
         if ctx.node_major_version >= 2:
@@ -69,7 +70,29 @@ class ChainTxExecutor(AssertionExecutor):
         t0 = time.monotonic()
 
         if ctx.node_major_version >= 2:
-            return await self._submit_v2(payload, app_addr, ctx, t0, expect_revert=expect_revert)
+            last_result = AssertionResult("chain_tx", False, detail="no iterations")
+            for i in range(repeat):
+                last_result = await self._submit_v2(
+                    payload, app_addr, ctx, t0, expect_revert=expect_revert
+                )
+                if not last_result.passed:
+                    last_result = AssertionResult(
+                        assertion_type="chain_tx",
+                        passed=False,
+                        detail=f"[{i+1}/{repeat}] {last_result.detail}",
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                    )
+                    return last_result
+            if repeat > 1:
+                last_result = AssertionResult(
+                    assertion_type="chain_tx",
+                    passed=True,
+                    expected=f"all {repeat} inputs accepted",
+                    actual=f"{repeat} inputs submitted",
+                    detail=f"Sent {repeat}× InputBox.addInput to {app_addr[:10]}…",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                )
+            return last_result
         else:
             return await self._submit_v1(payload, ctx, t0)
 

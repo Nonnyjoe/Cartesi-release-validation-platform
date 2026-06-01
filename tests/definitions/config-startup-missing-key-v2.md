@@ -12,8 +12,8 @@ timeout_seconds: 60
 requires: []
 assertions:
   - type: log_contains
-    service: claimer
-    text: "CARTESI_AUTH_PRIVATE_KEY"
+    component: claimer
+    pattern: "CARTESI_AUTH_PRIVATE_KEY"
     timeout_seconds: 30
     comment: "claimer should fail fast with clear missing-env error"
 ---

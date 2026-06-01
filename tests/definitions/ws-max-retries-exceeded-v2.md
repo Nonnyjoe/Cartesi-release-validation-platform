@@ -15,8 +15,8 @@ requires:
   - cartesi-node-v2
 assertions:
   - type: log_contains
-    service: evm-reader
-    text: "max retries"
+    component: evm-reader
+    pattern: "max retries"
     timeout_seconds: 60
     comment: "verify graceful failure log when retries are exhausted"
 ---

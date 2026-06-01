@@ -15,8 +15,8 @@ requires:
   - anvil
 assertions:
   - type: log_contains
-    service: evm-reader
-    text: "chain"
+    component: evm-reader
+    pattern: "chain"
     timeout_seconds: 30
     comment: "evm-reader should log chain ID mismatch error on startup"
 ---

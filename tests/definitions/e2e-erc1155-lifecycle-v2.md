@@ -20,10 +20,10 @@ assertions:
     amount: 100
   - type: voucher_v2
     mode: generate
+    token_type: erc1155
     expect_count: 1
     poll_interval: 3
     poll_timeout: 240
-    trigger_payload: "withdraw_erc1155"
 ---
 
 ## Description
