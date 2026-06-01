@@ -225,7 +225,9 @@ class VoucherV2Executor(AssertionExecutor):
         }, separators=(",", ":"))
         withdraw_hex = "0x" + withdraw_json.encode().hex()
 
-        _GAS = "--gas-price 100gwei"
+        # Explicit --gas-limit bypasses eth_estimateGas which can fail when the
+        # pending block is full (known Anvil quirk with ERC721 token operations).
+        _GAS = "--gas-price 100gwei --gas-limit 5000000"
         return (
             f"set -e\n"
             # Mint using deployer key (contract owner)
@@ -270,7 +272,9 @@ class VoucherV2Executor(AssertionExecutor):
         }, separators=(",", ":"))
         withdraw_hex = "0x" + withdraw_json.encode().hex()
 
-        _GAS = "--gas-price 100gwei"
+        # Explicit --gas-limit bypasses eth_estimateGas which can fail when the
+        # pending block is full (known Anvil quirk with ERC1155 token operations).
+        _GAS = "--gas-price 100gwei --gas-limit 5000000"
         return (
             f"set -e\n"
             # Mint using deployer key (contract owner)
@@ -372,6 +376,11 @@ class VoucherV2Executor(AssertionExecutor):
         timeout: float,
         t0: float,
     ) -> AssertionResult:
+        # Snapshot output count BEFORE generating so we can target only the new voucher.
+        # This prevents multiple concurrent execute-mode tests from competing for the
+        # same pool of already-executed vouchers.
+        initial_count = await self._get_output_count(ctx)
+
         try:
             await self._trigger_voucher(ctx, mode="execute")
         except Exception as exc:
@@ -382,11 +391,12 @@ class VoucherV2Executor(AssertionExecutor):
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        # Phase 1: poll for a voucher whose epoch has been claimed
-        log.info("Polling for voucher with claimed epoch (sandbox=%s, timeout=%ds)…",
-                 ctx.sandbox_id[:8], int(timeout))
+        # Phase 1: poll for a NEW voucher (index >= initial_count) whose epoch has been claimed.
+        log.info("Polling for new voucher (index>=%d) with claimed epoch (sandbox=%s, timeout=%ds)…",
+                 initial_count, ctx.sandbox_id[:8], int(timeout))
         vouchers = await self._poll_vouchers(ctx, expect_count, poll_interval,
-                                              timeout * 0.7, need_epoch_claim=True)
+                                              timeout * 0.7, need_epoch_claim=True,
+                                              min_output_index=initial_count)
         if not vouchers:
             elapsed = int(time.monotonic() - t0)
             return AssertionResult(
@@ -455,6 +465,22 @@ class VoucherV2Executor(AssertionExecutor):
 
     # ── Polling helper ─────────────────────────────────────────────────────────
 
+    async def _get_output_count(self, ctx: SandboxContext) -> int:
+        """Return the current total output count for the app (0 on error)."""
+        app_id = ctx.app_address or "app"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    ctx.jsonrpc_rpc_url,
+                    json={"jsonrpc": "2.0", "method": "cartesi_listOutputs",
+                          "params": [app_id], "id": 1},
+                    headers={"Content-Type": "application/json"},
+                )
+                data = resp.json().get("result", {}).get("data", [])
+                return len(data)
+        except Exception:
+            return 0
+
     async def _poll_vouchers(
         self,
         ctx: SandboxContext,
@@ -462,6 +488,7 @@ class VoucherV2Executor(AssertionExecutor):
         poll_interval: float,
         timeout: float,
         need_epoch_claim: bool,
+        min_output_index: int = 0,
     ) -> list[dict]:
         """
         Poll cartesi_listOutputs until at least expect_count Voucher-type outputs
@@ -510,6 +537,12 @@ class VoucherV2Executor(AssertionExecutor):
                     log.info("cartesi_listOutputs: %d item(s) for %s — types: %s",
                              len(data), app_id[:10],
                              [x.get("decoded_data", {}).get("type") for x in data[:5]])
+
+                # Restrict to outputs generated after we snapshotted the count
+                # (prevents execute-mode tests from competing for pre-existing vouchers).
+                if min_output_index > 0:
+                    data = [x for x in data
+                            if int(x.get("index", "0x0"), 16) >= min_output_index]
 
                 # Filter for Voucher-type outputs (type is in decoded_data)
                 vouchers = [
