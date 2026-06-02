@@ -86,7 +86,7 @@ _CLAIM_MANUAL_DELAY = 60.0
 # How long (seconds) an epoch may stay in INPUTS_PROCESSED before we restart
 # the validator container.  The validator normally processes within 10 seconds;
 # a longer stall means it has stopped polling new epochs.
-_INPUTS_PROCESSED_RESTART_DELAY = 90.0
+_INPUTS_PROCESSED_RESTART_DELAY = 45.0
 
 # Minimum gap (seconds) between consecutive validator restarts per sandbox,
 # so multiple concurrent tests don't race each other.
@@ -805,8 +805,6 @@ class VoucherV2Executor(AssertionExecutor):
                 c.restart(timeout=15)
 
             await loop.run_in_executor(None, _restart)
-            # Brief pause to let the validator come back up before the next poll iteration.
-            await asyncio.sleep(5)
         except Exception as exc:
             log.warning("Validator restart failed (sandbox=%s): %s", ctx.sandbox_id[:8], exc)
 
