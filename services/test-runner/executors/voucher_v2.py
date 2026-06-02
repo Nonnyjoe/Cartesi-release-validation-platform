@@ -499,10 +499,16 @@ class VoucherV2Executor(AssertionExecutor):
         Poll cartesi_listOutputs until at least expect_count Voucher-type outputs
         exist.  If need_epoch_claim=True, also waits until the epoch containing
         each voucher reaches CLAIM_ACCEPTED status.
+
+        If an epoch is CLAIM_COMPUTED (validator done, but claimer is stuck),
+        we manually submit the claim to the Authority contract and immediately
+        treat the voucher as ready — the claim is on-chain even if the node DB
+        hasn't updated yet, so executeOutput will succeed.
         """
         app_id   = ctx.app_address or "app"
         deadline = time.monotonic() + timeout
         _first   = True
+        _submitted_epochs: set[str] = set()  # epochs where we manually submitted a claim
 
         while time.monotonic() < deadline:
             try:
@@ -559,15 +565,35 @@ class VoucherV2Executor(AssertionExecutor):
                 ]
 
                 if need_epoch_claim:
-                    # Keep only vouchers whose epoch has been claimed
                     claimed = []
                     for v in vouchers:
                         epoch_idx = v.get("epoch_index", "0x0")
-                        status = await self._get_epoch_status(ctx, epoch_idx)
+                        epoch = await self._get_epoch_data(ctx, epoch_idx)
+                        status = epoch.get("status", "")
                         if status in _CLAIMED_STATUSES:
                             claimed.append(v)
+                        elif status == "CLAIM_COMPUTED":
+                            if epoch_idx not in _submitted_epochs:
+                                # Claimer is stuck — manually submit the claim.
+                                # After cast send succeeds the claim is on-chain;
+                                # executeOutput will work even before the node DB updates.
+                                ok = await self._submit_claim_if_computed(
+                                    ctx, epoch_idx, epoch
+                                )
+                                _submitted_epochs.add(epoch_idx)
+                                if ok:
+                                    log.info(
+                                        "Manually submitted claim for epoch %s — "
+                                        "voucher ready for execution (sandbox=%s)",
+                                        epoch_idx, ctx.sandbox_id[:8],
+                                    )
+                                    claimed.append(v)
+                            else:
+                                # Claim was already submitted in a prior iteration;
+                                # it is on-chain so executeOutput will succeed.
+                                claimed.append(v)
                         else:
-                            log.debug("Epoch %s status=%s — not yet claimed for %s",
+                            log.debug("Epoch %s status=%s — waiting for %s",
                                       epoch_idx, status, app_id[:10])
                     vouchers = claimed
 
@@ -585,8 +611,8 @@ class VoucherV2Executor(AssertionExecutor):
 
         return []
 
-    async def _get_epoch_status(self, ctx: SandboxContext, epoch_index: str) -> str:
-        """Return the epoch status string, or empty string on error."""
+    async def _get_epoch_data(self, ctx: SandboxContext, epoch_index: str) -> dict:
+        """Return the epoch data dict from cartesi_getEpoch, or {} on error."""
         app_id = ctx.app_address or "app"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -602,12 +628,98 @@ class VoucherV2Executor(AssertionExecutor):
                 )
                 body = resp.json()
             if "error" in body:
-                return ""
-            data = body.get("result", {}).get("data", {})
-            return data.get("status", "")
+                return {}
+            return body.get("result", {}).get("data", {})
         except Exception as exc:
             log.debug("cartesi_getEpoch error: %s", exc)
+            return {}
+
+    async def _get_authority_address(self, ctx: SandboxContext) -> str:
+        """Return the Authority (iconsensus) address for the app, or '' on error."""
+        app_id = ctx.app_address or ""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    ctx.jsonrpc_rpc_url,
+                    json={"jsonrpc": "2.0", "method": "cartesi_getApplication",
+                          "params": [app_id], "id": 1},
+                    headers={"Content-Type": "application/json"},
+                )
+                body = resp.json()
+            data = body.get("result", {}).get("data", {})
+            return data.get("iconsensus_address", "")
+        except Exception as exc:
+            log.warning("cartesi_getApplication error: %s", exc)
             return ""
+
+    async def _submit_claim_if_computed(
+        self,
+        ctx: SandboxContext,
+        epoch_index: str,
+        epoch_data: dict | None = None,
+    ) -> bool:
+        """
+        Manually submit the on-chain claim for an epoch that is stuck in
+        CLAIM_COMPUTED state (validator done, claimer not progressing).
+
+        Calls Authority.submitClaim(address app, uint256 lastBlock, bytes32 claimHash)
+        using the deployer key.  Function selector 0x6470af00 identified from
+        on-chain transaction traces against rollups-runtime 0.12.0-alpha.39.
+
+        Returns True if the claim is now on-chain (or was already claimed).
+        """
+        if epoch_data is None:
+            epoch_data = await self._get_epoch_data(ctx, epoch_index)
+
+        status = epoch_data.get("status", "")
+        if status in _CLAIMED_STATUSES:
+            return True
+        if status != "CLAIM_COMPUTED":
+            log.warning("_submit_claim_if_computed: epoch %s has status=%s, expected CLAIM_COMPUTED",
+                        epoch_index, status)
+            return False
+
+        claim_hash = epoch_data.get("claim_hash", "")
+        last_block_hex = epoch_data.get("last_block", "0x0")
+        if not claim_hash:
+            log.warning("CLAIM_COMPUTED epoch %s has no claim_hash", epoch_index)
+            return False
+
+        authority = await self._get_authority_address(ctx)
+        if not authority:
+            log.warning("Could not determine authority address for sandbox %s",
+                        ctx.sandbox_id[:8])
+            return False
+
+        # Build raw ABI calldata: selector + ABI-encoded (address, uint256, bytes32).
+        app_hex   = (ctx.app_address or "").lower().lstrip("0x").zfill(64)
+        last_block = int(last_block_hex, 16) if last_block_hex.startswith("0x") else int(last_block_hex)
+        hash_hex  = claim_hash.lstrip("0x").zfill(64)
+        calldata  = "0x6470af00" + app_hex + hex(last_block)[2:].zfill(64) + hash_hex
+
+        log.info(
+            "Epoch %s CLAIM_COMPUTED — submitting claim to authority %s (sandbox=%s)",
+            epoch_index, authority[:10], ctx.sandbox_id[:8],
+        )
+
+        script = (
+            f"set -e\n"
+            f"cast send --rpc-url {_ANVIL_RPC} --gas-price 100gwei "
+            f"--private-key {_DEPLOYER_KEY} \\\n"
+            f"  {authority} \\\n"
+            f"  {calldata} 2>&1\n"
+        )
+
+        loop = asyncio.get_event_loop()
+        try:
+            output = await loop.run_in_executor(
+                None, self._run_foundry_script_sync, script, ctx.sandbox_id
+            )
+            log.info("submitClaim epoch %s succeeded:\n%s", epoch_index, output[-400:])
+            return True
+        except Exception as exc:
+            log.warning("submitClaim epoch %s failed: %s", epoch_index, exc)
+            return False
 
     # ── Shell script for executeOutput ─────────────────────────────────────────
 
