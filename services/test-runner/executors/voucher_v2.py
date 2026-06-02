@@ -78,6 +78,24 @@ _V2_ETHER_AMOUNT     = 10 ** 18  # 1 ETH in wei
 # Epoch statuses that mean the Merkle proof is available for executeOutput.
 _CLAIMED_STATUSES = {"CLAIM_ACCEPTED", "SETTLED", "CLAIM_SUBMITTED"}
 
+# How long (seconds) to wait after first seeing CLAIM_COMPUTED before submitting
+# manually.  Gives the claimer time to process it naturally first; racing ahead
+# of the claimer causes "computed claim does not match event" → app inoperable.
+_CLAIM_MANUAL_DELAY = 60.0
+
+# How long (seconds) an epoch may stay in INPUTS_PROCESSED before we restart
+# the validator container.  The validator normally processes within 10 seconds;
+# a longer stall means it has stopped polling new epochs.
+_INPUTS_PROCESSED_RESTART_DELAY = 90.0
+
+# Minimum gap (seconds) between consecutive validator restarts per sandbox,
+# so multiple concurrent tests don't race each other.
+_VALIDATOR_RESTART_COOLDOWN = 120.0
+
+# Module-level: last restart timestamp per sandbox_id (not reset between tests
+# in the same run, intentionally preventing rapid re-restarts).
+_validator_last_restart: dict[str, float] = {}
+
 # decoded_data.type values that represent voucher outputs.
 _VOUCHER_TYPES = {"Voucher", "voucher", "VOUCHER"}
 
@@ -508,7 +526,9 @@ class VoucherV2Executor(AssertionExecutor):
         app_id   = ctx.app_address or "app"
         deadline = time.monotonic() + timeout
         _first   = True
-        _submitted_epochs: set[str] = set()  # epochs where we manually submitted a claim
+        _submitted_epochs: set[str] = set()            # epochs where we manually submitted
+        _epoch_first_seen: dict[str, float] = {}       # epoch_idx -> time first seen as CLAIM_COMPUTED
+        _epoch_inputs_seen: dict[str, float] = {}      # epoch_idx -> time first seen as INPUTS_PROCESSED
 
         while time.monotonic() < deadline:
             try:
@@ -573,25 +593,52 @@ class VoucherV2Executor(AssertionExecutor):
                         if status in _CLAIMED_STATUSES:
                             claimed.append(v)
                         elif status == "CLAIM_COMPUTED":
-                            if epoch_idx not in _submitted_epochs:
-                                # Claimer is stuck — manually submit the claim.
-                                # After cast send succeeds the claim is on-chain;
-                                # executeOutput will work even before the node DB updates.
+                            now = time.monotonic()
+                            if epoch_idx not in _epoch_first_seen:
+                                _epoch_first_seen[epoch_idx] = now
+                                log.info(
+                                    "Epoch %s CLAIM_COMPUTED — waiting %.0fs for claimer "
+                                    "before manual submit (sandbox=%s)",
+                                    epoch_idx, _CLAIM_MANUAL_DELAY, ctx.sandbox_id[:8],
+                                )
+                            age = now - _epoch_first_seen[epoch_idx]
+                            if epoch_idx in _submitted_epochs:
+                                # Claim was already manually submitted; on-chain so
+                                # executeOutput will succeed even if DB not updated yet.
+                                claimed.append(v)
+                            elif age >= _CLAIM_MANUAL_DELAY:
+                                # Claimer has not processed this epoch for _CLAIM_MANUAL_DELAY
+                                # seconds — it is stuck, submit manually.
                                 ok = await self._submit_claim_if_computed(
                                     ctx, epoch_idx, epoch
                                 )
                                 _submitted_epochs.add(epoch_idx)
                                 if ok:
                                     log.info(
-                                        "Manually submitted claim for epoch %s — "
-                                        "voucher ready for execution (sandbox=%s)",
-                                        epoch_idx, ctx.sandbox_id[:8],
+                                        "Manually submitted claim for epoch %s after %.0fs "
+                                        "(claimer stuck) — voucher ready (sandbox=%s)",
+                                        epoch_idx, age, ctx.sandbox_id[:8],
                                     )
                                     claimed.append(v)
                             else:
-                                # Claim was already submitted in a prior iteration;
-                                # it is on-chain so executeOutput will succeed.
-                                claimed.append(v)
+                                log.debug(
+                                    "Epoch %s CLAIM_COMPUTED for %.0fs, claimer has %.0fs "
+                                    "before manual fallback",
+                                    epoch_idx, age, _CLAIM_MANUAL_DELAY - age,
+                                )
+                        elif status == "INPUTS_PROCESSED":
+                            now = time.monotonic()
+                            if epoch_idx not in _epoch_inputs_seen:
+                                _epoch_inputs_seen[epoch_idx] = now
+                            age = now - _epoch_inputs_seen[epoch_idx]
+                            if age >= _INPUTS_PROCESSED_RESTART_DELAY:
+                                # Validator is not picking up new epochs — restart it.
+                                await self._maybe_restart_validator(ctx)
+                            else:
+                                log.debug(
+                                    "Epoch %s INPUTS_PROCESSED for %.0fs, waiting for validator",
+                                    epoch_idx, age,
+                                )
                         else:
                             log.debug("Epoch %s status=%s — waiting for %s",
                                       epoch_idx, status, app_id[:10])
@@ -720,6 +767,48 @@ class VoucherV2Executor(AssertionExecutor):
         except Exception as exc:
             log.warning("submitClaim epoch %s failed: %s", epoch_index, exc)
             return False
+
+    async def _maybe_restart_validator(self, ctx: SandboxContext) -> None:
+        """
+        Restart the validator container for this sandbox if it appears stuck
+        (epoch stuck in INPUTS_PROCESSED for too long).  Respects a cooldown to
+        prevent multiple concurrent tests from restarting it in rapid succession.
+        """
+        import docker as _docker
+
+        now = time.monotonic()
+        last = _validator_last_restart.get(ctx.sandbox_id, 0.0)
+        if now - last < _VALIDATOR_RESTART_COOLDOWN:
+            log.debug(
+                "Validator restart skipped — cooldown active (%.0fs remaining, sandbox=%s)",
+                _VALIDATOR_RESTART_COOLDOWN - (now - last), ctx.sandbox_id[:8],
+            )
+            return
+
+        _validator_last_restart[ctx.sandbox_id] = now
+        loop = asyncio.get_event_loop()
+        try:
+            def _restart() -> None:
+                client = _docker.from_env(timeout=30)
+                containers = client.containers.list(filters={"label": [
+                    f"rvp.sandbox_id={ctx.sandbox_id}",
+                    "rvp.component=validator",
+                ]})
+                if not containers:
+                    log.warning("No validator container found for sandbox %s", ctx.sandbox_id[:8])
+                    return
+                c = containers[0]
+                log.info(
+                    "Restarting validator %s (epoch stuck in INPUTS_PROCESSED, sandbox=%s)",
+                    c.name, ctx.sandbox_id[:8],
+                )
+                c.restart(timeout=15)
+
+            await loop.run_in_executor(None, _restart)
+            # Brief pause to let the validator come back up before the next poll iteration.
+            await asyncio.sleep(5)
+        except Exception as exc:
+            log.warning("Validator restart failed (sandbox=%s): %s", ctx.sandbox_id[:8], exc)
 
     # ── Shell script for executeOutput ─────────────────────────────────────────
 
