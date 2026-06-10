@@ -1,5 +1,6 @@
 ---
 id: notice-generation-v2
+ai_allowed: true
 name: Notice Generation — valid notice (v2.x)
 version: 1
 min_node_major_version: 2

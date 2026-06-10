@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-list-inputs-v2
+ai_allowed: true
 name: cartesi_listInputs pagination and epoch/sender filters (v2.x)
 version: 1
 min_node_major_version: 2

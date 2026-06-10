@@ -15,9 +15,12 @@ v2.x (SDK compose stack):
 
 v2.x GraphQL is served by jsonrpc-api at http://node_port/graphql (NOT graphql_port).
 """
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Any
+
+import httpx
 
 # On Docker for Mac / Docker Desktop, containers access host-mapped ports
 # via host.docker.internal rather than localhost.
@@ -185,3 +188,87 @@ class SandboxContext:
     @property
     def anvil_rpc_url(self) -> str:
         return f"http://{SANDBOX_HOST}:{self.anvil_port}"
+
+
+# ── Shared state-query helpers ─────────────────────────────────────────────────
+
+_helper_log = logging.getLogger("test-runner.executors.helpers")
+
+
+async def fetch_input_count(rpc_url: str, app_id: str) -> int:
+    """
+    Query cartesi_listInputs and return the total indexed input count.
+    Uses pagination.total_count to get the real total beyond the default page limit.
+    Returns -1 on any error so callers can omit the stat rather than crash.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                rpc_url,
+                json={"jsonrpc": "2.0", "method": "cartesi_listInputs",
+                      "params": {"application": app_id, "limit": 1000}, "id": 1},
+                headers={"Content-Type": "application/json"},
+            )
+            body = resp.json()
+            result = body.get("result", {})
+            pagination = result.get("pagination", {})
+            if pagination and "total_count" in pagination:
+                return pagination["total_count"]
+            return len(result.get("data", []))
+    except Exception as exc:
+        _helper_log.debug("fetch_input_count failed: %s", exc)
+        return -1
+
+
+async def fetch_output_count(rpc_url: str, app_id: str) -> int:
+    """
+    Query cartesi_listOutputs and return the current total output count.
+    Returns -1 on any error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                rpc_url,
+                json={"jsonrpc": "2.0", "method": "cartesi_listOutputs",
+                      "params": {"application": app_id, "limit": 1000}, "id": 1},
+                headers={"Content-Type": "application/json"},
+            )
+            body = resp.json()
+            result = body.get("result", {})
+            pagination = result.get("pagination", {})
+            if pagination and "total_count" in pagination:
+                return pagination["total_count"]
+            return len(result.get("data", []))
+    except Exception as exc:
+        _helper_log.debug("fetch_output_count failed: %s", exc)
+        return -1
+
+
+def count_before_result(noun: str, count: int) -> "AssertionResult":
+    """Probe assertion logged before an action to capture the starting count."""
+    return AssertionResult(
+        assertion_type="count_before",
+        passed=True,
+        detail=f"{noun} before: {count}",
+        duration_ms=0,
+    )
+
+
+def count_after_result(noun: str, before: int, after: int,
+                       require_increase: bool = True) -> "AssertionResult":
+    """Verification assertion logged after an action to confirm the count changed."""
+    if after > before:
+        detail = f"{noun} after: {after} (+{after - before})"
+        passed = True
+    elif after == before:
+        detail = f"{noun} after: {after} (no change)"
+        passed = not require_increase
+    else:
+        detail = f"{noun} after: {after} (decreased from {before})"
+        passed = False
+    return AssertionResult(
+        assertion_type="count_after",
+        passed=passed,
+        detail=detail,
+        duration_ms=0,
+    )

@@ -1,5 +1,6 @@
 ---
 id: inspect-state
+ai_allowed: true
 name: Inspect State REST Endpoint
 version: 1
 tags: [inspect, core, rest-api]

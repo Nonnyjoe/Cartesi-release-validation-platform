@@ -39,23 +39,30 @@ For every fault you inject, use `report_finding` to document:
 Be thorough. A production rollups node must handle all of these without data loss or corruption."""
 
 
-def render(
-    node_version: str,
-    sandbox_context: dict,
-    goal: str | None = None,
-) -> str:
-    sandbox_info = f"""
-## Sandbox Context
-- Node version: {node_version}
-- Anvil RPC: {sandbox_context.get('anvil_rpc_url', 'http://anvil:8545')}
-- Node HTTP: {sandbox_context.get('node_url', 'http://node:8080')}
-- GraphQL: {sandbox_context.get('graphql_url', 'http://node:8080/graphql')}
-- Docker network: {sandbox_context.get('docker_network', 'unknown')}
-"""
+def render(architecture, graphql_schema, inspect_api, component_map,
+           release_context, project_knowledge="", skills_summary="",
+           goal=None, sandbox_id=None, **_) -> str:
+    """Signature matches the assembler's render(...) kwargs convention
+    (see context/assembler.py:build_system_prompt)."""
+    sandbox_info = f"\n## Sandbox\n- sandbox_id: {sandbox_id or 'not bound'}\n" if sandbox_id else ""
     custom_goal = f"\n## Custom Goal\n{goal}\n" if goal else ""
 
     return f"""{CHAOS_INTRO}
+
+{release_context}
 {sandbox_info}{custom_goal}
+## System Architecture
+
+{architecture}
+
+## Project Knowledge
+
+{project_knowledge}
+
+## Cartesi Skills
+
+{skills_summary}
+
 ## Available Tools
 You have all standard agent tools PLUS:
 - `restart_component(component)` — restart 'node' or 'anvil' container

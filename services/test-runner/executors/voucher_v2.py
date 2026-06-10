@@ -30,7 +30,7 @@ import uuid
 
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext
+from .base import AssertionExecutor, AssertionResult, SandboxContext, count_before_result, count_after_result
 
 log = logging.getLogger("test-runner.executor.voucher_v2")
 
@@ -357,6 +357,9 @@ class VoucherV2Executor(AssertionExecutor):
         t0: float,
         token_type: str = "erc20",
     ) -> AssertionResult:
+        # Snapshot output count before triggering so we can show the delta.
+        before_count = await self._get_output_count(ctx)
+
         try:
             await self._trigger_voucher(ctx, mode="generate", token_type=token_type)
         except Exception as exc:
@@ -367,22 +370,25 @@ class VoucherV2Executor(AssertionExecutor):
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
 
-        vouchers = await self._poll_vouchers(ctx, expect_count, poll_interval,
-                                              timeout, need_epoch_claim=False)
-        passed = len(vouchers) >= expect_count
-        app_id = ctx.app_address or "app"
-        return AssertionResult(
+        vouchers    = await self._poll_vouchers(ctx, expect_count, poll_interval,
+                                               timeout, need_epoch_claim=False)
+        passed      = len(vouchers) >= expect_count
+        after_count = before_count + len(vouchers)
+        main = AssertionResult(
             assertion_type="voucher_v2",
             passed=passed,
             expected=f">= {expect_count} voucher(s) in cartesi_listOutputs",
             actual=f"{len(vouchers)} voucher(s) found",
             detail=(
-                f"cartesi_listOutputs({app_id[:10]}…) returned "
-                f"{len(vouchers)} voucher(s) after polling "
-                f"{int(time.monotonic() - t0)}s"
+                f"Found {len(vouchers)} new voucher(s) after polling {int(time.monotonic() - t0)}s"
             ),
             duration_ms=int((time.monotonic() - t0) * 1000),
         )
+        return [
+            count_before_result("outputs", before_count),
+            main,
+            count_after_result("outputs", before_count, after_count),
+        ]
 
     # ── Execute mode ───────────────────────────────────────────────────────────
 
@@ -460,7 +466,7 @@ class VoucherV2Executor(AssertionExecutor):
                 )
 
             passed = "status: 1" in output.lower() or "transactionhash" in output.lower()
-            return AssertionResult(
+            main = AssertionResult(
                 assertion_type="voucher_v2",
                 passed=passed,
                 expected="executeOutput tx status=1",
@@ -472,6 +478,12 @@ class VoucherV2Executor(AssertionExecutor):
                 ),
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
+            after_count = await self._get_output_count(ctx)
+            return [
+                count_before_result("outputs", initial_count),
+                main,
+                count_after_result("outputs", initial_count, after_count, require_increase=False),
+            ]
 
         # All vouchers were already executed
         return AssertionResult(

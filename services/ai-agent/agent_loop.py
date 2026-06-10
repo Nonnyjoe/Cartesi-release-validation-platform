@@ -14,14 +14,13 @@ from typing import AsyncIterator, Callable, Any
 import anthropic
 
 from tools import AGENT_TOOLS, CHAOS_TOOLS
-from tools.chaos_executor import execute_restart_component, execute_pause_network
 from tools.reporting import get_all_findings
 from tool_executor import ToolExecutor
 
 log = logging.getLogger("ai-agent.loop")
 
-ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL               = "claude-opus-4-6"
+FALLBACK_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+DEFAULT_MODEL       = "claude-opus-4-6"
 MAX_TOKENS          = 8096
 CONTEXT_WINDOW      = 200_000
 COMPRESS_THRESHOLD  = 0.80    # compress history when 80% of window used
@@ -50,16 +49,21 @@ class AgentLoop:
         executor: ToolExecutor,
         mode: str,
         on_event: Callable[[dict], None],   # called for each streamed event
+        api_key: str | None = None,
+        model: str | None = None,
     ):
         self.system_prompt  = system_prompt
         self.executor       = executor
         self.mode           = mode
         self.on_event       = on_event
+        self.model          = model or DEFAULT_MODEL
         self.messages: list[dict] = []
         self.tool_call_count = 0
         self.total_tokens    = 0
         self.start_time      = time.monotonic()
-        self._client         = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        self._client         = anthropic.AsyncAnthropic(
+            api_key=api_key or FALLBACK_ANTHROPIC_API_KEY,
+        )
 
     @property
     def _limits(self) -> dict:
@@ -131,11 +135,14 @@ class AgentLoop:
         current_text = ""
         stop_reason  = "end_turn"
 
+        # Chaos sessions additionally get the fault-injection tools.
+        tools = AGENT_TOOLS + CHAOS_TOOLS if self.mode == "chaos" else AGENT_TOOLS
+
         async with self._client.messages.stream(
-            model=MODEL,
+            model=self.model,
             max_tokens=MAX_TOKENS,
             system=self.system_prompt,
-            tools=AGENT_TOOLS,
+            tools=tools,
             messages=self.messages,
         ) as stream:
             async for event in stream:
@@ -227,7 +234,7 @@ class AgentLoop:
             + json.dumps(to_summarise)
         )
         resp = await self._client.messages.create(
-            model=MODEL,
+            model=self.model,
             max_tokens=2000,
             messages=[{"role": "user", "content": summary_prompt}],
         )

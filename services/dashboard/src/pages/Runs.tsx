@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { runsApi, releasesApi, appsApi } from '../api'
+import { runsApi, releasesApi, appsApi, testsApi } from '../api'
 import { StatusBadge } from '../components/StatusBadge'
-import type { Run, RunStatus, ReleaseEntry, Application } from '../types'
+import type { Run, RunStatus, ReleaseEntry, Application, PhaseGroup } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { format } from 'date-fns'
 
@@ -10,14 +10,98 @@ const STATUSES: RunStatus[] = ['queued', 'provisioning', 'running', 'completed',
 const PAGE_SIZE = 20
 
 
+// ─── Category picker (inside trigger modal) ───────────────────────────────────
+
+function CategoryPicker({
+  phases,
+  selected,
+  onChange,
+}: {
+  phases:   PhaseGroup[]
+  selected: Set<string>
+  onChange: (s: Set<string>) => void
+}) {
+  const [openPhases, setOpenPhases] = useState<Set<string>>(new Set())
+
+  const togglePhase = (phase: string) =>
+    setOpenPhases(s => { const n = new Set(s); n.has(phase) ? n.delete(phase) : n.add(phase); return n })
+
+  const toggleCategory = (cat: string) => {
+    const n = new Set(selected)
+    n.has(cat) ? n.delete(cat) : n.add(cat)
+    onChange(n)
+  }
+
+  const toggleAllInPhase = (pg: PhaseGroup, checked: boolean) => {
+    const n = new Set(selected)
+    for (const c of pg.categories) {
+      checked ? n.add(c.category) : n.delete(c.category)
+    }
+    onChange(n)
+  }
+
+  return (
+    <div className="border border-rvp-border rounded-lg overflow-hidden max-h-52 overflow-y-auto text-xs">
+      {phases.map(pg => {
+        const allChecked = pg.categories.every(c => selected.has(c.category))
+        const someChecked = pg.categories.some(c => selected.has(c.category))
+        const phaseOpen = openPhases.has(pg.phase)
+        return (
+          <div key={pg.phase} className="border-b border-rvp-border/50 last:border-0">
+            <div className="flex items-center gap-2 px-3 py-2 bg-rvp-bg/40 hover:bg-white/3">
+              <input
+                type="checkbox"
+                checked={allChecked}
+                ref={el => { if (el) el.indeterminate = someChecked && !allChecked }}
+                onChange={e => toggleAllInPhase(pg, e.target.checked)}
+                className="accent-rvp-primary"
+              />
+              <button
+                type="button"
+                className="flex-1 text-left text-gray-300 font-medium flex items-center gap-1.5"
+                onClick={() => togglePhase(pg.phase)}
+              >
+                <span className="text-gray-600">{phaseOpen ? '▼' : '▶'}</span>
+                {pg.phase}
+              </button>
+              <span className="text-gray-600">
+                {pg.categories.filter(c => selected.has(c.category)).length}/{pg.categories.length}
+              </span>
+            </div>
+            {phaseOpen && pg.categories.map(c => (
+              <label key={c.category}
+                className="flex items-center gap-2 px-4 py-1.5 hover:bg-white/3 cursor-pointer text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={selected.has(c.category)}
+                  onChange={() => toggleCategory(c.category)}
+                  className="accent-rvp-primary"
+                />
+                <span className="flex-1">{c.category}</span>
+                <span className="text-gray-600">{c.active_count}</span>
+              </label>
+            ))}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+
+// ─── Trigger modal ────────────────────────────────────────────────────────────
+
 function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: (r: Run) => void }) {
-  const [catalog,         setCatalog]         = useState<ReleaseEntry[]>([])
-  const [apps,            setApps]            = useState<Application[]>([])
-  const [selectedTag,     setSelectedTag]     = useState('')
-  const [selectedAppId,   setSelectedAppId]   = useState('')
-  const [triggeredByUser, setTriggeredByUser] = useState('')
-  const [loading,         setLoading]         = useState(false)
-  const [error,           setError]           = useState('')
+  const [catalog,           setCatalog]           = useState<ReleaseEntry[]>([])
+  const [apps,              setApps]              = useState<Application[]>([])
+  const [phases,            setPhases]            = useState<PhaseGroup[]>([])
+  const [selectedTag,       setSelectedTag]       = useState('')
+  const [selectedAppId,     setSelectedAppId]     = useState('')
+  const [triggeredByUser,   setTriggeredByUser]   = useState('')
+  const [scopeMode,         setScopeMode]         = useState<'all' | 'categories'>('all')
+  const [selectedCats,      setSelectedCats]      = useState<Set<string>>(new Set())
+  const [loading,           setLoading]           = useState(false)
+  const [error,             setError]             = useState('')
 
   useEffect(() => {
     releasesApi.list().then(entries => {
@@ -30,13 +114,24 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
       const active = list.filter((a: Application) => a.is_active)
       if (active.length > 0) setSelectedAppId(active[0].id)
     }).catch(console.error)
+
+    testsApi.categories().then(setPhases).catch(console.error)
   }, [])
 
   const selected    = catalog.find(e => e.tag === selectedTag) ?? null
   const selectedApp = apps.find(a => a.id === selectedAppId) ?? null
+  const isV2        = (selected?.node_major_version ?? 1) >= 2
 
-  // Only v2.x releases (node_major_version >= 2) can run with an application
-  const isV2 = (selected?.node_major_version ?? 1) >= 2
+  const totalSelectedTests = useMemo(() => {
+    if (scopeMode === 'all') return null
+    let n = 0
+    for (const pg of phases) {
+      for (const c of pg.categories) {
+        if (selectedCats.has(c.category)) n += c.active_count
+      }
+    }
+    return n
+  }, [scopeMode, selectedCats, phases])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -51,6 +146,9 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
         triggered_by:      'user',
         triggered_by_user: triggeredByUser.trim() || undefined,
         app_id:            selectedAppId || undefined,
+        category_filter:   scopeMode === 'categories' && selectedCats.size > 0
+                             ? Array.from(selectedCats)
+                             : undefined,
       })
       onCreated(run)
       onClose()
@@ -59,7 +157,7 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="card w-full max-w-md p-6 space-y-4">
+      <div className="card w-full max-w-md p-6 space-y-4 max-h-[90vh] overflow-y-auto">
         <h2 className="text-lg font-semibold text-gray-100">Trigger New Run</h2>
         <form onSubmit={submit} className="space-y-4">
 
@@ -86,13 +184,11 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               </select>
             )}
             {selected && (
-              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
-                {selected.image_tag}
-              </div>
+              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">{selected.image_tag}</div>
             )}
           </div>
 
-          {/* Application selector — required for v2.x */}
+          {/* Application selector */}
           <div>
             <label className="text-xs text-gray-400 block mb-1">
               Application *
@@ -116,16 +212,59 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               </select>
             )}
             {selectedApp && (
-              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">
-                {selectedApp.github_url}
-              </div>
+              <div className="mt-1.5 text-xs text-gray-500 font-mono truncate">{selectedApp.github_url}</div>
             )}
           </div>
 
+          {/* Triggered by */}
           <div>
             <label className="text-xs text-gray-400 block mb-1">Your Name</label>
             <input className="input w-full" placeholder="optional" value={triggeredByUser}
               onChange={e => setTriggeredByUser(e.target.value)} />
+          </div>
+
+          {/* Test Scope */}
+          <div>
+            <label className="text-xs text-gray-400 block mb-2">Test Scope</label>
+            <div className="flex flex-col gap-1.5 mb-2">
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="radio" name="scope" value="all" checked={scopeMode === 'all'}
+                  onChange={() => setScopeMode('all')} className="accent-rvp-primary" />
+                All active tests
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <input type="radio" name="scope" value="categories" checked={scopeMode === 'categories'}
+                  onChange={() => setScopeMode('categories')} className="accent-rvp-primary" />
+                Select categories
+              </label>
+            </div>
+
+            {scopeMode === 'categories' && (
+              <>
+                {phases.length === 0 ? (
+                  <div className="text-xs text-gray-500">Loading categories…</div>
+                ) : (
+                  <CategoryPicker
+                    phases={phases}
+                    selected={selectedCats}
+                    onChange={setSelectedCats}
+                  />
+                )}
+                <div className="flex items-center justify-between mt-1.5 text-xs text-gray-500">
+                  <span>
+                    {selectedCats.size > 0
+                      ? `${selectedCats.size} categor${selectedCats.size === 1 ? 'y' : 'ies'} · ~${totalSelectedTests ?? 0} tests`
+                      : 'No categories selected — will run all tests'}
+                  </span>
+                  {selectedCats.size > 0 && (
+                    <button type="button" className="text-rvp-primary hover:underline"
+                      onClick={() => setSelectedCats(new Set())}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           {error && <div className="text-xs text-rvp-error">{error}</div>}
@@ -143,12 +282,14 @@ function TriggerModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   )
 }
 
+// ─── Runs list ────────────────────────────────────────────────────────────────
+
 export default function Runs() {
-  const [runs, setRuns] = useState<Run[]>([])
-  const [offset, setOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
+  const [runs, setRuns]             = useState<Run[]>([])
+  const [offset, setOffset]         = useState(0)
+  const [hasMore, setHasMore]       = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('')
-  const [showModal, setShowModal] = useState(false)
+  const [showModal, setShowModal]   = useState(false)
 
   const load = async (off = offset, filter = statusFilter) => {
     try {

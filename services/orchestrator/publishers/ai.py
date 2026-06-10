@@ -28,13 +28,20 @@ class AIPublisher:
         await conn.close()
 
     async def publish_user_message(self, session_id: str, message: str):
+        # Routed via the existing ai.requests queue (rvp.ai is a DIRECT exchange,
+        # so per-session routing keys would never reach a consumer). The ai-agent
+        # consumer recognises type=user_message and dispatches to the live session.
         conn, channel = await self._connect()
         exchange = await channel.get_exchange(Exchange.AI)
         await exchange.publish(
             aio_pika.Message(
-                body=json.dumps({"session_id": session_id, "message": message}).encode(),
+                body=json.dumps({
+                    "type": "user_message",
+                    "session_id": session_id,
+                    "message": message,
+                }).encode(),
                 content_type="application/json",
             ),
-            routing_key=f"ai.session.{session_id}.message",
+            routing_key=RoutingKey.AI_REQUESTS,
         )
         await conn.close()

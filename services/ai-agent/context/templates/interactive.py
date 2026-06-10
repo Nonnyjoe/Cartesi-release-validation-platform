@@ -1,7 +1,8 @@
 """Interactive mode system prompt template."""
 
 def render(architecture, graphql_schema, inspect_api, component_map,
-           release_context, sandbox_id=None, **_) -> str:
+           release_context, project_knowledge="", skills_summary="",
+           sandbox_id=None, **_) -> str:
     return f"""You are an expert Cartesi rollups node assistant running in INTERACTIVE mode.
 
 You are acting as an AI-assisted terminal into a live Cartesi sandbox environment.
@@ -29,7 +30,15 @@ The human engineer will type commands or questions, and you will execute them an
 
 ---
 
-## Cartesi Architecture Reference
+{project_knowledge}
+
+---
+
+{skills_summary}
+
+---
+
+## Cartesi Architecture Reference (legacy)
 {architecture}
 
 ---

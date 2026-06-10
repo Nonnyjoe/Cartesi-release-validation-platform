@@ -7,6 +7,7 @@ import { SandboxSetupPanel } from '../components/SandboxSetupPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { Run, TestResult, ReleaseEntry, RunEvent, RunLogLine } from '../types'
 import type { StepEntry } from '../components/SandboxSetupPanel'
+import { groupSources, type ParsedSource } from '../utils/logSources'
 import { formatDistanceToNow, format } from 'date-fns'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -83,12 +84,84 @@ function sourceColor(source: string): string {
   return sourceColorCache.get(source)!
 }
 
+// ─── Sidebar source group component ──────────────────────────────────────────
+
+function SourceGroupSection({
+  title,
+  sources,
+  activeSrcs,
+  onToggle,
+  onSelectAll,
+  onClearAll,
+  defaultOpen,
+  srcSearch,
+}: {
+  title:      string
+  sources:    ParsedSource[]
+  activeSrcs: Set<string>
+  onToggle:   (raw: string) => void
+  onSelectAll: () => void
+  onClearAll:  () => void
+  defaultOpen: boolean
+  srcSearch:   string
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+
+  const visible = srcSearch
+    ? sources.filter(s => s.label.toLowerCase().includes(srcSearch.toLowerCase()))
+    : sources
+
+  if (visible.length === 0) return null
+
+  return (
+    <div className="mb-1">
+      <div className="flex items-center gap-1 px-1 py-1">
+        <button
+          className="flex-1 flex items-center gap-1 text-[10px] font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-300 transition-colors text-left"
+          onClick={() => setOpen(o => !o)}
+        >
+          <span className="text-gray-600 w-2">{open ? '▼' : '▶'}</span>
+          {title}
+          <span className="ml-1 font-normal text-gray-600">({visible.length})</span>
+        </button>
+        <button
+          className="text-[9px] text-gray-600 hover:text-rvp-primary transition-colors"
+          onClick={onSelectAll}
+          title={`Select all ${title}`}
+        >All</button>
+        <span className="text-gray-700 text-[9px]">/</span>
+        <button
+          className="text-[9px] text-gray-600 hover:text-rvp-error transition-colors"
+          onClick={onClearAll}
+          title={`Clear all ${title}`}
+        >✕</button>
+      </div>
+      {open && visible.map(s => (
+        <button
+          key={s.raw}
+          onClick={() => onToggle(s.raw)}
+          className={`w-full text-left text-xs px-3 py-1 rounded transition-colors flex items-center gap-1.5 ${
+            activeSrcs.has(s.raw) ? 'bg-white/10 font-medium' : 'text-gray-500 hover:bg-white/5'
+          }`}
+          style={{ color: activeSrcs.has(s.raw) ? sourceColor(s.raw) : undefined }}
+          title={s.raw}
+        >
+          <span className="truncate">{s.label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ─── Log Viewer ───────────────────────────────────────────────────────────────
+
 interface LogViewerProps {
   runId:    string
   isActive: boolean
+  results:  TestResult[]
 }
 
-function LogViewer({ runId, isActive }: LogViewerProps) {
+function LogViewer({ runId, isActive, results }: LogViewerProps) {
   const [lines,       setLines]       = useState<RunLogLine[]>([])
   const [nextCursor,  setNextCursor]  = useState<number | null>(null)
   const [loading,     setLoading]     = useState(true)
@@ -97,17 +170,26 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
   const [activeSrcs,  setActiveSrcs]  = useState<Set<string>>(new Set())
   const [levelFilter, setLevelFilter] = useState<'all' | 'warn' | 'error'>('all')
   const [search,      setSearch]      = useState('')
+  const [srcSearch,   setSrcSearch]   = useState('')
   const [autoScroll,  setAutoScroll]  = useState(true)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Build result ID → slug map for human-readable test source labels
+  const resultMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of results) {
+      m.set(r.id.replace(/-/g, '').slice(0, 8), r.test_slug)
+      // Also try the raw UUID prefix without stripping dashes
+      m.set(r.id.slice(0, 8), r.test_slug)
+    }
+    return m
+  }, [results])
+
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true)
-    // Fetch all distinct sources up-front so the sidebar is complete immediately,
-    // regardless of how many lines are loaded (Anvil's startup output otherwise
-    // dominates the first page and hides all other sources).
     runsApi.logSources(runId).then(res => {
       setSources(new Set(res.sources))
     }).catch(console.error)
@@ -172,6 +254,12 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
     if (atBottom && !autoScroll) setAutoScroll(true)
   }
 
+  // ── Grouped sources ────────────────────────────────────────────────────
+  const groups = useMemo(
+    () => groupSources([...sources], resultMap),
+    [sources, resultMap],
+  )
+
   // ── Filtered view (client-side) ───────────────────────────────────────
   const LEVEL_RANKS: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 }
   const minRank = levelFilter === 'error' ? 0 : levelFilter === 'warn' ? 1 : 99
@@ -188,12 +276,15 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
   const toggleSource = (src: string) => {
     setActiveSrcs(prev => {
       const next = new Set(prev)
-      if (next.has(src)) next.delete(src); else next.add(src)
+      next.has(src) ? next.delete(src) : next.add(src)
       return next
     })
   }
 
-  const sortedSources = useMemo(() => [...sources].sort(), [sources])
+  const selectGroup = (srcs: ParsedSource[]) =>
+    setActiveSrcs(prev => { const n = new Set(prev); srcs.forEach(s => n.add(s.raw)); return n })
+  const clearGroup = (srcs: ParsedSource[]) =>
+    setActiveSrcs(prev => { const n = new Set(prev); srcs.forEach(s => n.delete(s.raw)); return n })
 
   if (loading) return <div className="text-sm text-gray-500 py-8 text-center">Loading logs…</div>
 
@@ -207,44 +298,89 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
   )
 
   return (
-    <div className="flex gap-3 h-[600px]">
+    <div className="flex gap-3 h-[min(70vh,800px)]">
       {/* ── Source sidebar ── */}
-      <aside className="w-44 shrink-0 flex flex-col gap-1 overflow-y-auto">
-        <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 px-1">Sources</div>
-        <button
-          className={`text-left text-xs px-2 py-1.5 rounded transition-colors ${
-            activeSrcs.size === 0 ? 'bg-rvp-primary/20 text-rvp-primary' : 'text-gray-400 hover:bg-white/5'
-          }`}
-          onClick={() => setActiveSrcs(new Set())}
-        >
-          All sources
-        </button>
-        {sortedSources.map(src => (
-          <button
-            key={src}
-            onClick={() => toggleSource(src)}
-            className={`text-left text-xs px-2 py-1.5 rounded transition-colors truncate ${
-              activeSrcs.has(src) ? 'bg-white/10 font-medium' : 'text-gray-500 hover:bg-white/5'
-            }`}
-            style={{ color: activeSrcs.has(src) ? sourceColor(src) : undefined }}
-            title={src}
-          >
-            {src}
-          </button>
-        ))}
+      <aside className="w-64 shrink-0 flex flex-col min-h-0 border border-rvp-border rounded-lg overflow-hidden">
+        {/* Sidebar header + search */}
+        <div className="px-2 pt-2 pb-1 shrink-0 border-b border-rvp-border/50">
+          <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5 px-1">Sources</div>
+          <input
+            className="input w-full text-xs py-1 h-6"
+            placeholder="Filter sources…"
+            value={srcSearch}
+            onChange={e => setSrcSearch(e.target.value)}
+          />
+        </div>
 
-        <div className="mt-3 text-[10px] text-gray-500 uppercase tracking-wider px-1">Level</div>
-        {(['all', 'warn', 'error'] as const).map(lvl => (
+        {/* All sources button */}
+        <div className="px-2 pt-1 shrink-0">
           <button
-            key={lvl}
-            onClick={() => setLevelFilter(lvl)}
-            className={`text-left text-xs px-2 py-1.5 rounded transition-colors ${
-              levelFilter === lvl ? 'bg-rvp-primary/20 text-rvp-primary' : 'text-gray-500 hover:bg-white/5'
+            className={`w-full text-left text-xs px-2 py-1.5 rounded transition-colors ${
+              activeSrcs.size === 0 ? 'bg-rvp-primary/20 text-rvp-primary' : 'text-gray-400 hover:bg-white/5'
             }`}
+            onClick={() => setActiveSrcs(new Set())}
           >
-            {lvl === 'all' ? 'All levels' : lvl === 'warn' ? '≥ warn' : 'Error only'}
+            All sources
           </button>
-        ))}
+        </div>
+
+        {/* Grouped source list */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-1">
+          {groups.services.length > 0 && (
+            <SourceGroupSection
+              title="Services"
+              sources={groups.services}
+              activeSrcs={activeSrcs}
+              onToggle={toggleSource}
+              onSelectAll={() => selectGroup(groups.services)}
+              onClearAll={() => clearGroup(groups.services)}
+              defaultOpen={true}
+              srcSearch={srcSearch}
+            />
+          )}
+          {groups.tests.length > 0 && (
+            <SourceGroupSection
+              title="Tests"
+              sources={groups.tests}
+              activeSrcs={activeSrcs}
+              onToggle={toggleSource}
+              onSelectAll={() => selectGroup(groups.tests)}
+              onClearAll={() => clearGroup(groups.tests)}
+              defaultOpen={groups.tests.length <= 8}
+              srcSearch={srcSearch}
+            />
+          )}
+          {groups.other.length > 0 && (
+            <SourceGroupSection
+              title="Other"
+              sources={groups.other}
+              activeSrcs={activeSrcs}
+              onToggle={toggleSource}
+              onSelectAll={() => selectGroup(groups.other)}
+              onClearAll={() => clearGroup(groups.other)}
+              defaultOpen={false}
+              srcSearch={srcSearch}
+            />
+          )}
+        </div>
+
+        {/* Level filter — pinned at bottom */}
+        <div className="shrink-0 border-t border-rvp-border px-2 py-2">
+          <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 px-1">Level</div>
+          <div className="flex flex-col gap-0.5">
+            {(['all', 'warn', 'error'] as const).map(lvl => (
+              <button
+                key={lvl}
+                onClick={() => setLevelFilter(lvl)}
+                className={`text-left text-xs px-2 py-1 rounded transition-colors ${
+                  levelFilter === lvl ? 'bg-rvp-primary/20 text-rvp-primary' : 'text-gray-500 hover:bg-white/5'
+                }`}
+              >
+                {lvl === 'all' ? 'All levels' : lvl === 'warn' ? '≥ warn' : 'Error only'}
+              </button>
+            ))}
+          </div>
+        </div>
       </aside>
 
       {/* ── Log pane ── */}
@@ -291,14 +427,14 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
           </a>
         </div>
 
-        {/* Log lines — virtual-ish: render only what's here (DOM is manageable at ≤2000 lines) */}
+        {/* Log lines */}
         <div
           ref={scrollRef}
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed p-3 space-y-0.5"
         >
           {filtered.map((line, i) => {
-            const ts   = line.ts ? format(new Date(line.ts), 'HH:mm:ss') : ''
+            const ts    = line.ts ? format(new Date(line.ts), 'HH:mm:ss') : ''
             const color = LEVEL_COLORS[line.level] ?? 'text-gray-300'
             const sColor = sourceColor(line.source)
             return (
@@ -307,7 +443,7 @@ function LogViewer({ runId, isActive }: LogViewerProps) {
                 className={`flex gap-2 hover:bg-white/[0.03] rounded px-1 py-0.5 ${color}`}
               >
                 <span className="text-gray-600 shrink-0 w-16">{ts}</span>
-                <span className="shrink-0 w-28 truncate" style={{ color: sColor }} title={line.source}>
+                <span className="shrink-0 w-36 truncate" style={{ color: sColor }} title={line.source}>
                   [{line.source}]
                 </span>
                 <span className={`shrink-0 w-10 ${color}`}>{line.level.toUpperCase().slice(0, 4)}</span>
@@ -337,18 +473,25 @@ export default function RunDetail() {
   const [tab, setTab]           = useState<'tests' | 'logs' | 'setup'>('tests')
   const [release, setRelease]   = useState<ReleaseEntry | null>(null)
 
-  const seenStepTsRef = useRef<Set<string>>(new Set())
+  const seenStepTsRef    = useRef<Set<string>>(new Set())
+  const resultsDebounce  = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const loadRun = () => {
+  const loadRun = useCallback(() => {
     if (runId) runsApi.get(runId).then(setRun).catch(console.error)
-  }
-  const loadResults = () => {
+  }, [runId])
+
+  const loadResults = useCallback(() => {
     if (!runId) return
     runsApi.report(runId).then(report => {
       setResults(report.results)
       setPassRate(report.pass_rate ?? null)
     }).catch(console.error)
-  }
+  }, [runId])
+
+  const debouncedLoadResults = useCallback(() => {
+    if (resultsDebounce.current) clearTimeout(resultsDebounce.current)
+    resultsDebounce.current = setTimeout(loadResults, 400)
+  }, [loadResults])
 
   useEffect(() => { loadRun(); loadResults() }, [runId])
 
@@ -382,7 +525,12 @@ export default function RunDetail() {
     onEvent: (ev) => {
       if (ev.event_type === 'log_batch') return  // handled by LogViewer directly
 
-      if (ev.event_type.startsWith('run.') || ev.event_type.startsWith('test.')
+      if (ev.event_type === 'test.result') {
+        debouncedLoadResults()
+        return
+      }
+
+      if (ev.event_type.startsWith('run.')
           || ev.event_type === 'sandbox.ready' || ev.event_type === 'sandbox.failed') {
         loadRun()
         loadResults()
@@ -553,7 +701,7 @@ export default function RunDetail() {
       )}
 
       {tab === 'logs' && runId && (
-        <LogViewer runId={runId} isActive={isActive} />
+        <LogViewer runId={runId} isActive={isActive} results={results} />
       )}
     </div>
   )

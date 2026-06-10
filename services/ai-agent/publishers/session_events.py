@@ -32,7 +32,8 @@ async def publish_session_event(event: dict):
     1. rvp.ai → ai.results (RabbitMQ, durable)
     2. rvp:live (Redis pub/sub, for WebSocket dashboard relay)
     """
-    body = json.dumps(event).encode()
+    # default=str handles UUIDs, datetimes, and other non-JSON-native types
+    body = json.dumps(event, default=str).encode()
 
     # RabbitMQ
     try:
@@ -53,7 +54,7 @@ async def publish_session_event(event: dict):
     # Redis pub/sub (best-effort — dashboard live stream)
     try:
         redis = aioredis.from_url(REDIS_URL, decode_responses=True)
-        await redis.publish(PUBSUB_CHANNEL, json.dumps(event))
+        await redis.publish(PUBSUB_CHANNEL, json.dumps(event, default=str))
         await redis.aclose()
     except Exception as exc:
         log.warning("Failed to publish to Redis: %s", exc)

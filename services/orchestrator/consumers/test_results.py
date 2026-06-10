@@ -17,7 +17,7 @@ import aio_pika
 from sqlalchemy import text
 
 from db import AsyncSessionLocal
-from publishers.notifications import publish_notification
+from publishers.notifications import publish_notification, publish_live
 
 log = logging.getLogger("orchestrator.consumer.test_results")
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL", "amqp://rvp:changeme@localhost:5672/")
@@ -59,6 +59,15 @@ class TestResultConsumer:
         slug   = msg.get("definition_slug")
         log.info("Test result: %s → %s  run=%s", slug, msg.get("status"), run_id)
 
+        # Broadcast immediately so the dashboard streams tests in real-time
+        # without waiting for the whole run to finish.
+        await publish_live({
+            "event_type":    "test.result",
+            "run_id":        run_id,
+            "definition_slug": slug,
+            "status":        msg.get("status"),
+        })
+
         async with AsyncSessionLocal() as db:
             # Compare completed results against the dispatched count from run metadata.
             # Tests are processed sequentially by the test-runner, so later tests may
@@ -87,7 +96,7 @@ class TestResultConsumer:
             if dispatched == 0 or in_flight > 0 or finished < dispatched:
                 return  # dispatched_count not yet written, or tests still running/pending
 
-            # Compute pass rate
+            # Compute overall pass rate
             stats = await db.execute(
                 text("""
                     SELECT
@@ -108,23 +117,80 @@ class TestResultConsumer:
                     UPDATE orchestrator.runs
                     SET status=:status, pass_rate=:rate, completed_at=:ts
                     WHERE id=:id AND status = 'running'
-                    RETURNING id
+                    RETURNING id, release_tag, triggered_by, triggered_by_user,
+                              started_at, completed_at,
+                              EXTRACT(EPOCH FROM (NOW() - started_at))::int AS duration_seconds
                 """),
                 {"status": final, "rate": rate,
                  "ts": datetime.now(tz=timezone.utc), "id": run_id},
             )
             updated = result.fetchone()
-            await db.commit()
+            if not updated:
+                await db.commit()
+                return  # concurrent result already closed — skip expensive queries
 
-        if not updated:
-            # Another concurrent result already closed this run — do nothing
-            log.debug("Run %s already transitioned (concurrent result) — skipping notification", run_id)
-            return
+            # Collect per-phase stats and failing test details for the notification
+            phase_rows = await db.execute(
+                text("""
+                    SELECT
+                      COALESCE(d.phase, 'Uncategorised') AS phase,
+                      COUNT(*)                                                   AS total,
+                      COUNT(*) FILTER (WHERE res.status = 'passed')             AS passed,
+                      COUNT(*) FILTER (WHERE res.status NOT IN ('passed','running','pending')) AS failed
+                    FROM tests.results res
+                    JOIN tests.definitions d ON d.id = res.definition_id
+                    WHERE res.run_id = :run_id
+                    GROUP BY d.phase
+                    ORDER BY d.phase NULLS LAST
+                """),
+                {"run_id": run_id},
+            )
+            phases_data = []
+            for pr in phase_rows:
+                ph_rate = (pr.passed / pr.total * 100) if pr.total else 0.0
+                phases_data.append({
+                    "phase":     pr.phase,
+                    "total":     pr.total,
+                    "passed":    pr.passed,
+                    "failed":    pr.failed,
+                    "pass_rate": round(ph_rate, 1),
+                })
+
+            # Top failing tests with error messages
+            fail_rows = await db.execute(
+                text("""
+                    SELECT d.name, res.status, res.error_message
+                    FROM tests.results res
+                    JOIN tests.definitions d ON d.id = res.definition_id
+                    WHERE res.run_id = :run_id
+                      AND res.status NOT IN ('passed', 'running', 'pending')
+                    ORDER BY res.completed_at
+                    LIMIT 5
+                """),
+                {"run_id": run_id},
+            )
+            failed_tests = [
+                {"name": fr.name, "status": fr.status,
+                 "error": (fr.error_message or "")[:200]}
+                for fr in fail_rows
+            ]
+
+            await db.commit()
 
         log.info("Run %s → %s (pass_rate=%.1f%%)", run_id, final, rate)
         await publish_notification(
             f"run.{final}", f"Run {final}",
-            run_id=run_id, pass_rate=rate,
+            run_id=run_id,
+            pass_rate=rate,
+            release_tag=updated.release_tag,
+            triggered_by=updated.triggered_by,
+            triggered_by_user=updated.triggered_by_user,
+            duration_seconds=updated.duration_seconds,
+            total_tests=row.total,
+            passed_tests=row.passed,
+            failed_tests=len(failed_tests),
+            phases=phases_data,
+            top_failures=failed_tests,
             is_success=(final == "completed"),
             is_warning=(final == "warning"),
             is_error=(final == "failed"),

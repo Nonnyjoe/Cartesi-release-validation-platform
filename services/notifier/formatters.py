@@ -11,6 +11,7 @@ Discord embed colour codes (decimal):
   info     #6366f1 → 6513393
   neutral  #64748b → 6582411
 """
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +44,29 @@ def _bar(value: float, total: int = 10) -> str:
     """Render a simple emoji progress bar for pass rates."""
     filled = round(value / 100 * total)
     return "█" * filled + "░" * (total - filled)
+
+
+def _phase_number(phase: str) -> int:
+    """Extract leading integer from 'Phase N: ...' strings for sorting."""
+    m = re.match(r"Phase\s+(\d+)", phase or "")
+    return int(m.group(1)) if m else 9999
+
+
+def _phase_icon(pass_rate: float) -> str:
+    if pass_rate >= 100:
+        return "✅"
+    if pass_rate >= 80:
+        return "⚠️"
+    return "❌"
+
+
+def _phase_colour_text(pass_rate: float) -> str:
+    """ANSI-style label for inline display."""
+    if pass_rate >= 100:
+        return "PASS"
+    if pass_rate > 0:
+        return "PARTIAL"
+    return "FAIL"
 
 
 # ─── 1. Release Detected ─────────────────────────────────────────────────────
@@ -81,7 +105,7 @@ def format_run_queued(run: dict) -> list[dict]:
     run_id = run.get("run_id", "")
     short_id = run_id[:8]
     return [{
-        "title": f"⏳ Validation Run Queued",
+        "title": "⏳ Validation Run Queued",
         "color": COLOUR["neutral"],
         "fields": [
             {"name": "Run ID",    "value": f"`{short_id}`",                  "inline": True},
@@ -95,65 +119,152 @@ def format_run_queued(run: dict) -> list[dict]:
     }]
 
 
-# ─── 3. Run Completed ─────────────────────────────────────────────────────────
+# ─── helpers shared by completed / warning formatters ────────────────────────
+
+def _build_phase_lines(phases: list[dict]) -> str:
+    """
+    Build a compact phase summary block for the embed description.
+    Each line: <icon> Phase N: Name   X/Y  (rate%)
+    """
+    sorted_phases = sorted(phases, key=lambda p: _phase_number(p.get("phase", "")))
+    lines = []
+    for ph in sorted_phases:
+        icon     = _phase_icon(ph["pass_rate"])
+        name     = ph.get("phase") or "Uncategorised"
+        passed   = ph.get("passed", 0)
+        total    = ph.get("total", 0)
+        rate     = ph.get("pass_rate", 0.0)
+        bar      = _bar(rate, total=8)
+        lines.append(f"{icon} **{name}**  `{passed}/{total}`  {bar}  **{rate:.0f}%**")
+    return "\n".join(lines)
+
+
+# ─── 3. Run Completed (all tests passed ≥ threshold) ─────────────────────────
 
 def format_run_completed(run: dict, report: dict | None = None) -> list[dict]:
-    run_id = run.get("run_id", "")
+    run_id   = run.get("run_id", "")
     short_id = run_id[:8]
-    pass_rate = run.get("pass_rate", 0.0) or 0.0
-    passed = run.get("passed_tests", 0)
-    failed = run.get("failed_tests", 0)
-    total  = run.get("total_tests", 0)
-    duration = run.get("duration_seconds")
+    pass_rate  = float(run.get("pass_rate", 0.0) or 0.0)
+    passed     = run.get("passed_tests", 0) or 0
+    failed     = run.get("failed_tests", 0) or 0
+    total      = run.get("total_tests", 0) or 0
+    duration   = run.get("duration_seconds")
+    release    = run.get("release_tag", "—")
+    triggered  = run.get("triggered_by", "—")
+    triggered_user = run.get("triggered_by_user")
+    phases: list[dict] = run.get("phases") or []
+    top_failures: list[dict] = run.get("top_failures") or []
 
-    colour = COLOUR["success"] if pass_rate >= 90 else COLOUR["warning"] if pass_rate >= 70 else COLOUR["error"]
+    by_str = f"{triggered_user} ({triggered})" if triggered_user else triggered
+
+    # Header bar
     bar = _bar(pass_rate)
 
+    # Build description: overall bar + phase breakdown
+    desc_parts = [
+        f"## {bar}  **{pass_rate:.1f}%** pass rate\n",
+    ]
+    if phases:
+        desc_parts.append(_build_phase_lines(phases))
+
+    description = "\n".join(desc_parts)
+
     fields: list[dict] = [
-        {"name": "Pass Rate",  "value": f"{bar}  **{pass_rate:.1f}%**",      "inline": False},
-        {"name": "Passed",     "value": str(passed),                          "inline": True},
-        {"name": "Failed",     "value": str(failed),                          "inline": True},
-        {"name": "Total",      "value": str(total),                           "inline": True},
-        {"name": "Version",    "value": run.get("node_version", "?"),         "inline": True},
-        {"name": "Duration",   "value": f"{duration}s" if duration else "—",  "inline": True},
+        {"name": "Release",   "value": f"`{release}`",                         "inline": True},
+        {"name": "Triggered", "value": by_str,                                 "inline": True},
+        {"name": "Duration",  "value": f"{duration}s" if duration else "—",    "inline": True},
+        {"name": "✅ Passed",  "value": str(passed),                            "inline": True},
+        {"name": "❌ Failed",  "value": str(failed),                            "inline": True},
+        {"name": "Total",     "value": str(total),                              "inline": True},
     ]
 
-    # Top failing tests
-    if report:
-        failures = [r for r in report.get("results", []) if r.get("status") in ("failed", "error")][:5]
-        if failures:
-            fail_text = "\n".join(f"✗ {r['definition_name']}" for r in failures)
-            fields.append({"name": "Failing Tests", "value": fail_text, "inline": False})
+    # Append failing test details if any slipped through (warning threshold)
+    if top_failures:
+        fail_lines = []
+        for t in top_failures[:5]:
+            status_icon = "⚠️" if t.get("status") == "error" else "✗"
+            error_snippet = t.get("error", "").strip()
+            if error_snippet:
+                fail_lines.append(f"{status_icon} **{t['name']}**\n  `{error_snippet[:120]}`")
+            else:
+                fail_lines.append(f"{status_icon} **{t['name']}** — _{t.get('status', 'failed')}_")
+        fields.append({"name": "Failing Tests", "value": "\n".join(fail_lines), "inline": False})
+
+    # Colour and title based on pass rate
+    if pass_rate >= 100:
+        colour = COLOUR["success"]
+        title  = f"✅ All Tests Passed — {short_id}"
+    elif pass_rate >= 80:
+        colour = COLOUR["warning"]
+        title  = f"⚠️ Run Completed with Warnings — {short_id}"
+    else:
+        colour = COLOUR["error"]
+        title  = f"❌ Run Completed — Low Pass Rate — {short_id}"
 
     return [{
-        "title": f"{'✅' if pass_rate >= 90 else '⚠️' if pass_rate >= 70 else '❌'} Run Completed — {short_id}",
-        "color": colour,
-        "fields": fields,
-        "url": f"{DASHBOARD_URL}/runs/{run_id}",
-        "timestamp": _ts(run.get("completed_at")),
-        "footer": {"text": "Cartesi RVP · Orchestrator"},
+        "title":       title,
+        "description": description,
+        "color":       colour,
+        "fields":      fields,
+        "url":         f"{DASHBOARD_URL}/runs/{run_id}",
+        "timestamp":   _ts(),
+        "footer":      {"text": "Cartesi RVP · Orchestrator"},
     }]
 
 
-# ─── 4. Run Failed ────────────────────────────────────────────────────────────
+# ─── 4. Run Failed (infrastructure / provisioning failure) ───────────────────
 
 def format_run_failed(run: dict) -> list[dict]:
-    run_id = run.get("run_id", "")
+    run_id   = run.get("run_id", "")
     short_id = run_id[:8]
-    error = run.get("error_message", "Unknown failure reason")[:300]
+    release  = run.get("release_tag", "—")
+    triggered = run.get("triggered_by", "—")
+    triggered_user = run.get("triggered_by_user")
+    duration = run.get("duration_seconds")
+    by_str   = f"{triggered_user} ({triggered})" if triggered_user else triggered
+
+    # Determine failure stage and reason
+    stage   = run.get("status", "failed")
+    error   = (run.get("error_message") or run.get("fields", {}).get("error_message") or "Unknown failure reason")
+    error   = error.strip()[:400]
+
+    # Phase results up to the point of failure (may be partial)
+    phases: list[dict] = run.get("phases") or []
+    top_failures: list[dict] = run.get("top_failures") or []
+
+    # Build description
+    desc_parts = ["### Failure Reason\n```\n" + error + "\n```"]
+    if phases:
+        desc_parts.append("\n### Phase Results at Time of Failure")
+        desc_parts.append(_build_phase_lines(phases))
+
+    description = "\n".join(desc_parts)
+
+    fields: list[dict] = [
+        {"name": "Release",   "value": f"`{release}`",                      "inline": True},
+        {"name": "Triggered", "value": by_str,                              "inline": True},
+        {"name": "Stage",     "value": stage.upper(),                       "inline": True},
+        {"name": "Duration",  "value": f"{duration}s" if duration else "—", "inline": True},
+    ]
+
+    if top_failures:
+        fail_lines = []
+        for t in top_failures[:5]:
+            err = t.get("error", "").strip()
+            if err:
+                fail_lines.append(f"✗ **{t['name']}**\n  `{err[:120]}`")
+            else:
+                fail_lines.append(f"✗ **{t['name']}** — _{t.get('status', 'failed')}_")
+        fields.append({"name": "Failing Tests", "value": "\n".join(fail_lines), "inline": False})
 
     return [{
-        "title": f"❌ Run Failed — {short_id}",
-        "description": f"```\n{error}\n```",
-        "color": COLOUR["error"],
-        "fields": [
-            {"name": "Version",  "value": run.get("node_version", "?"),         "inline": True},
-            {"name": "Triggered","value": run.get("triggered_by", "?"),          "inline": True},
-            {"name": "Stage",    "value": run.get("status", "failed"),           "inline": True},
-        ],
-        "url": f"{DASHBOARD_URL}/runs/{run_id}",
-        "timestamp": _ts(run.get("completed_at")),
-        "footer": {"text": "Cartesi RVP · Orchestrator"},
+        "title":       f"❌ Run Failed — {short_id}",
+        "description": description,
+        "color":       COLOUR["error"],
+        "fields":      fields,
+        "url":         f"{DASHBOARD_URL}/runs/{run_id}",
+        "timestamp":   _ts(),
+        "footer":      {"text": "Cartesi RVP · Orchestrator"},
     }]
 
 

@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-get-node-version-v2
+ai_allowed: true
 name: cartesi_getNodeVersion returns version string (v2.x)
 version: 1
 min_node_major_version: 2

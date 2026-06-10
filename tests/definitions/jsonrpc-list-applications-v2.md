@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-list-applications-v2
+ai_allowed: true
 name: cartesi_listApplications pagination (v2.x)
 version: 1
 min_node_major_version: 2

@@ -8,3 +8,6 @@ pydantic>=2.7
 pydantic-settings>=2.2
 httpx>=0.27
 python-multipart>=0.0.9
+# Required for AES-GCM encryption of per-session AI keys.
+# Comment out (and the code will fall back to base64 — INSECURE) if PyPI is unreachable.
+cryptography>=42.0

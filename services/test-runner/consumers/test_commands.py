@@ -51,14 +51,34 @@ class TestCommandConsumer:
         self._loader = loader
         self._connection = None
         self._channel = None
+        self._ai_channel = None
 
     async def start_consuming(self):
         self._connection = await aio_pika.connect_robust(RABBITMQ_URL)
         self._channel = await self._connection.channel()
         await self._channel.set_qos(prefetch_count=5)
 
-        queue = await self._channel.get_queue("tests.commands")
-        log.info("Test Runner consuming tests.commands...")
+        bulk_queue = await self._channel.get_queue("tests.commands")
+
+        # Priority lane for AI-triggered tests (trigger_test tool). A full-suite
+        # sweep can leave ~200 messages / ~80 min of backlog on tests.commands;
+        # AI sessions poll for results with a 90s deadline, so their commands
+        # must not queue behind the sweep. Own channel → own prefetch, so bulk
+        # messages can't occupy the AI lane's delivery slots.
+        # Declared idempotently here AND in infra/rabbitmq/definitions.json.
+        self._ai_channel = await self._connection.channel()
+        await self._ai_channel.set_qos(prefetch_count=1)
+        ai_queue = await self._ai_channel.declare_queue("tests.commands.ai", durable=True)
+        exchange = await self._ai_channel.get_exchange("rvp.tests")
+        await ai_queue.bind(exchange, routing_key="tests.commands.ai")
+
+        log.info("Test Runner consuming tests.commands + tests.commands.ai (AI priority lane)...")
+        await asyncio.gather(
+            self._consume(bulk_queue),
+            self._consume(ai_queue),
+        )
+
+    async def _consume(self, queue):
         async with queue.iterator() as q:
             async for message in q:
                 async with message.process():
@@ -120,6 +140,30 @@ class TestCommandConsumer:
             log.warning("Definition %s not found in cache — skipping", definition_id)
             return
 
+        # AI-triggered runs: apply parameter overrides, or use the pre-built parsed override.
+        session_id = msg.get("session_id")
+        parameter_overrides = msg.get("parameter_overrides") or {}
+        parsed_override = msg.get("definition_parsed_override")
+        ai_result_id = msg.get("result_id")
+        if parsed_override or parameter_overrides:
+            definition = dict(definition)  # shallow copy so we don't pollute the cache
+            if parsed_override:
+                definition["definition_parsed"] = parsed_override
+            elif parameter_overrides:
+                from copy import deepcopy
+                dp = deepcopy(definition.get("definition_parsed") or {})
+                for assertion in dp.get("assertions", []) or []:
+                    if not isinstance(assertion, dict):
+                        continue
+                    for k, v in parameter_overrides.items():
+                        if k in assertion and k != "type":
+                            assertion[k] = v
+                definition["definition_parsed"] = dp
+            log.info(
+                "AI override applied: slug=%s session=%s keys=%s",
+                definition_slug, session_id, list(parameter_overrides.keys()),
+            )
+
         ctx = SandboxContext(
             sandbox_id=sandbox_id,
             run_id=run_id,
@@ -140,8 +184,9 @@ class TestCommandConsumer:
             erc1155_token_address=erc1155_token_address,
         )
 
-        # Insert a running result row
-        result_id  = str(uuid.uuid4())
+        # Insert a running result row. For AI-triggered runs, use the result_id the agent
+        # generated so it can poll for completion.
+        result_id  = ai_result_id or str(uuid.uuid4())
         started_at = datetime.now(tz=timezone.utc)
         async with SessionLocal() as db:
             await db.execute(

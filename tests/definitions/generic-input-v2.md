@@ -1,5 +1,6 @@
 ---
 id: generic-input-v2
+ai_allowed: true
 name: Generic Input (v2.x) — valid payload
 version: 1
 min_node_major_version: 2

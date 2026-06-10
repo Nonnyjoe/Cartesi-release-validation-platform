@@ -80,12 +80,16 @@ async def run_test(definition: dict, ctx: SandboxContext) -> dict[str, Any]:
                     continue
 
                 result = await executor.execute(assertion, ctx)
-                results.append(result.to_dict())
 
-                if not result.passed:
-                    overall_status = "failed"
-                    log.info("Assertion FAILED: %s — %s", atype, result.detail)
-                else:
+                # Executors may return a single AssertionResult or a list
+                # (e.g. [count_before, action, count_after]).
+                items = result if isinstance(result, list) else [result]
+                for item in items:
+                    results.append(item.to_dict())
+                    if not item.passed:
+                        overall_status = "failed"
+                        log.info("Assertion FAILED: %s — %s", item.assertion_type, item.detail)
+                if all(i.passed for i in items):
                     log.debug("Assertion passed: %s", atype)
 
     except asyncio.TimeoutError:

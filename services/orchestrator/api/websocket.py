@@ -58,19 +58,21 @@ class ConnectionManager:
                 self._connections.pop(channel, None)
 
     async def broadcast(self, message: str):
-        """Send message to global subscribers + any channel matching the event's run_id."""
+        """Send to global subscribers + any channel matching the event's run_id or session_id."""
         try:
-            run_id = json.loads(message).get("run_id")
+            parsed = json.loads(message)
+            keys = [parsed.get("run_id"), parsed.get("session_id")]
         except Exception:
-            run_id = None
+            keys = []
 
         # Snapshot the target connections under the lock, then send outside it
         async with self._lock:
             targets: list[WebSocket] = list(self._connections.get(None, []))
-            if run_id and run_id in self._connections:
-                for ws in self._connections[run_id]:
-                    if ws not in targets:
-                        targets.append(ws)
+            for key in keys:
+                if key and key in self._connections:
+                    for ws in self._connections[key]:
+                        if ws not in targets:
+                            targets.append(ws)
 
         dead: list[WebSocket] = []
         for ws in targets:

@@ -5,7 +5,7 @@ import { AgentStream } from '../components/AgentStream'
 import { StatusBadge } from '../components/StatusBadge'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { AgentEvent } from '../components/AgentStream'
-import type { AISession } from '../types'
+import type { AISession, ToolInvocation } from '../types'
 
 export default function Session() {
   const { sessionId } = useParams<{ sessionId: string }>()
@@ -13,11 +13,26 @@ export default function Session() {
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [message, setMessage] = useState('')
   const [sending, setSending] = useState(false)
+  const [tools, setTools] = useState<ToolInvocation[]>([])
+  const [showToolPanel, setShowToolPanel] = useState(false)
+  const [expandedTool, setExpandedTool] = useState<string | null>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
   const loadSession = () => { if (sessionId) sessionsApi.get(sessionId).then(setSession).catch(console.error) }
+  const loadTools = () => {
+    if (!sessionId) return
+    sessionsApi.tools(sessionId).then(setTools).catch(console.error)
+  }
 
-  useEffect(() => { loadSession() }, [sessionId])
+  useEffect(() => { loadSession(); loadTools() }, [sessionId])
+
+  // Refresh the tool audit list whenever the websocket emits a tool event
+  useEffect(() => {
+    const recent = events[events.length - 1]
+    if (recent?.type === 'ai.tool_call' || recent?.type === 'ai.tool_result') {
+      loadTools()
+    }
+  }, [events.length])
 
   const { connected } = useWebSocket({
     channel: sessionId,
@@ -108,6 +123,67 @@ export default function Session() {
       {/* Stream */}
       <div className="card flex-1 overflow-hidden min-h-[400px]">
         <AgentStream events={events} className="h-full" />
+      </div>
+
+      {/* Tool audit panel */}
+      <div className="card">
+        <button
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-gray-200 hover:bg-white/5"
+          onClick={() => setShowToolPanel(o => !o)}
+        >
+          <span>Tool invocations ({tools.length})</span>
+          <span className="text-gray-500">{showToolPanel ? '▼' : '▶'}</span>
+        </button>
+        {showToolPanel && (
+          <div className="border-t border-rvp-border max-h-[400px] overflow-y-auto">
+            {tools.length === 0 ? (
+              <div className="px-4 py-6 text-center text-xs text-gray-500">
+                No tool calls recorded yet.
+              </div>
+            ) : (
+              <ul className="divide-y divide-rvp-border/50 text-xs">
+                {tools.map(t => {
+                  const isOpen = expandedTool === t.id
+                  const statusColor =
+                    t.status === 'ok'     ? 'bg-rvp-success/20 text-rvp-success' :
+                    t.status === 'denied' ? 'bg-rvp-warning/20 text-rvp-warning' :
+                                            'bg-rvp-error/20 text-rvp-error'
+                  return (
+                    <li key={t.id}>
+                      <button
+                        className="w-full text-left px-4 py-2 hover:bg-white/3 flex items-start gap-3"
+                        onClick={() => setExpandedTool(isOpen ? null : t.id)}
+                      >
+                        <span className="text-gray-500 w-20 shrink-0 font-mono">
+                          {new Date(t.created_at).toLocaleTimeString()}
+                        </span>
+                        <span className={`badge shrink-0 ${statusColor}`}>{t.status}</span>
+                        <span className="font-mono text-gray-200 flex-1 truncate">{t.tool_name}</span>
+                        <span className="text-gray-500 shrink-0">{t.duration_ms}ms</span>
+                      </button>
+                      {isOpen && (
+                        <div className="px-6 pb-3 space-y-2">
+                          <div>
+                            <div className="text-gray-500 text-[10px] uppercase mb-1">input</div>
+                            <pre className="font-mono text-[11px] bg-rvp-bg/60 p-2 rounded overflow-x-auto">
+                              {JSON.stringify(t.input, null, 2)}
+                            </pre>
+                          </div>
+                          <div>
+                            <div className="text-gray-500 text-[10px] uppercase mb-1">output</div>
+                            <pre className="font-mono text-[11px] bg-rvp-bg/60 p-2 rounded overflow-x-auto max-h-64">
+                              {JSON.stringify(t.output, null, 2)}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Findings summary */}

@@ -41,10 +41,17 @@ log = logging.getLogger("notifier")
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://rvp:rvp_secret@rabbitmq:5672/rvp")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
+def _fmt_run_completed(p: dict) -> list[dict]:
+    # payload is the `fields` dict from publish_notification — it contains
+    # pass_rate, phases, top_failures, etc. directly at the top level.
+    return format_run_completed(p.get("run", p), p.get("report"))
+
+
 FORMATTERS: dict = {
     "release.detected": format_release_detected,
     "run.queued":       format_run_queued,
-    "run.completed":    lambda p: format_run_completed(p.get("run", p), p.get("report")),
+    "run.completed":    _fmt_run_completed,
+    "run.warning":      _fmt_run_completed,   # warning uses the same formatter
     "run.failed":       format_run_failed,
     "ai.finding":       format_ai_finding,
 }

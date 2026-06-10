@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-get-epoch-v2
+ai_allowed: true
 name: cartesi_getEpoch fetch specific epoch index (v2.x)
 version: 1
 min_node_major_version: 2
@@ -8,7 +9,7 @@ csv_ids: ["8.6"]
 release_introduced: v2.0.0
 component: jsonrpc
 priority: medium
-timeout_seconds: 30
+timeout_seconds: 240
 requires:
   - cartesi-node-v2
 assertions:
@@ -18,6 +19,7 @@ assertions:
     method: cartesi_getEpoch
     use_app_address: true
     use_last_epoch: true
+    poll_timeout: 180
 ---
 
 ## Description

@@ -99,6 +99,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
+      # Symmetric key for AES-GCM encryption of per-session Anthropic API keys
+      # (must be identical in ai-agent). base64 of 32 random bytes — see .env.example.
+      # :? = compose refuses to start if unset — a `:-` default would silently
+      # override the service env_file value with "" (test report 2026-06-10, F-2).
+      AI_SESSION_KEY: ${AI_SESSION_KEY:?AI_SESSION_KEY must be set in root .env — base64 of 32 random bytes, see .env.example}
     ports:
       - "8000:8000"
     networks:
@@ -184,8 +189,17 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rvp}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-rvp}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rvp}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379
+      AI_READER_DATABASE_URL: postgresql://ai_reader:ai_reader_changeme@postgres:5432/${POSTGRES_DB:-rvp}
+      SANDBOX_HOST: host.docker.internal
+      # Must match the orchestrator's AI_SESSION_KEY (decrypt side).
+      AI_SESSION_KEY: ${AI_SESSION_KEY:?AI_SESSION_KEY must be set in root .env — base64 of 32 random bytes, see .env.example}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./shared:/app/shared:ro
+      - /Users/idogwuchi/Documents/Cartesi/cartesi-skills:/app/knowledge/cartesi-skills:ro
+      # Docker socket for run_cli_command (docker exec into sandbox containers)
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - rvp-internal
     depends_on:

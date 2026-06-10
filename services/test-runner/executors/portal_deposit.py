@@ -28,7 +28,8 @@ import uuid
 
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext
+from .base import (AssertionExecutor, AssertionResult, SandboxContext,
+                   fetch_input_count, count_before_result, count_after_result)
 
 log = logging.getLogger("test-runner.executor.portal_deposit")
 
@@ -185,17 +186,23 @@ class PortalDepositExecutor(AssertionExecutor):
         token_id   = int(assertion.get("token_id", 1))
         t0 = time.monotonic()
 
+        # Snapshot input count before deposit so the detail shows the delta.
+        before_count = (
+            await fetch_input_count(ctx.jsonrpc_rpc_url, ctx.app_address or "app")
+            if ctx.node_major_version >= 2 else -1
+        )
+
         try:
             if token_type == "ether":
-                return await self._deposit_ether(assertion, ctx, amount, t0)
+                result = await self._deposit_ether(assertion, ctx, amount, t0)
             elif token_type == "erc20":
-                return await self._deposit_erc20(assertion, ctx, amount, t0)
+                result = await self._deposit_erc20(assertion, ctx, amount, t0)
             elif token_type == "erc721":
-                return await self._deposit_erc721(assertion, ctx, token_id, t0)
+                result = await self._deposit_erc721(assertion, ctx, token_id, t0)
             elif token_type == "erc1155":
-                return await self._deposit_erc1155(assertion, ctx, token_id, amount, t0)
+                result = await self._deposit_erc1155(assertion, ctx, token_id, amount, t0)
             elif token_type == "erc1155_batch":
-                return await self._deposit_erc1155_batch(assertion, ctx, t0)
+                result = await self._deposit_erc1155_batch(assertion, ctx, t0)
             else:
                 return AssertionResult(
                     assertion_type="portal_deposit",
@@ -211,6 +218,24 @@ class PortalDepositExecutor(AssertionExecutor):
                 detail=f"{type(exc).__name__}: {exc}",
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
+
+        if before_count >= 0:
+            # Poll up to 15s for the evm-reader to index the new input(s)
+            after_count = before_count
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                after_count = await fetch_input_count(
+                    ctx.jsonrpc_rpc_url, ctx.app_address or "app"
+                )
+                if after_count > before_count:
+                    break
+                await asyncio.sleep(2)
+            return [
+                count_before_result("inputs", before_count),
+                result,
+                count_after_result("inputs", before_count, after_count),
+            ]
+        return result
 
     # ── Ether deposit ──────────────────────────────────────────────────────────
 

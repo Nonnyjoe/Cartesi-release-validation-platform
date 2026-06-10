@@ -471,6 +471,17 @@ class SandboxQueueConsumer:
     async def _wait_for_tests(self, sandbox_id: str, run_id: str, timeout: int = 7200):
         for _ in range(timeout // 5):
             await asyncio.sleep(5)
+
+            # ── Mid-run cancellation check ────────────────────────────────────
+            # POST /runs/{id}/cancel only flips orchestrator.runs.status; without
+            # this check the sandbox lived until the whole test backlog drained
+            # (test report 2026-06-10, F-3). Returning here triggers the caller's
+            # `finally:` teardown within one poll interval (~5s).
+            if await self._is_run_cancelled(run_id):
+                log.info("Run %s cancelled mid-run — tearing down sandbox %s",
+                         run_id, sandbox_id)
+                return
+
             async with SessionLocal() as db:
                 meta_row = await db.execute(
                     text("""

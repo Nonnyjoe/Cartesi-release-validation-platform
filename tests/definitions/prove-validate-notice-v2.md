@@ -8,7 +8,7 @@ csv_ids: ["7.1"]
 release_introduced: v2.0.0
 component: claimer
 priority: high
-timeout_seconds: 180
+timeout_seconds: 360
 requires:
   - anvil
   - cartesi-node-v2
@@ -24,6 +24,8 @@ assertions:
     args: "validate {app_address} 0"
     expect_exit_code: 0
     expect_output_contains: "validated"
+    poll_timeout: 180
+    poll_interval: 15
 ---
 
 ## Description

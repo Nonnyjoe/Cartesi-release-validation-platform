@@ -74,9 +74,10 @@ AGENT_TOOLS: list[dict] = [
     {
         "name": "read_logs",
         "description": (
-            "Read stdout/stderr logs from a sandbox container. "
-            "Use 'node' to read the Cartesi rollups node logs, "
-            "'anvil' to read Anvil chain logs. "
+            "Read stdout/stderr logs from a sandbox container. v2.x sandboxes run "
+            "separate containers per node service: advancer, claimer, validator, "
+            "jsonrpc, evm-reader, plus anvil, cli, db. 'node' falls back to the "
+            "advancer/jsonrpc containers. "
             "Essential for diagnosing failures and confirming expected behaviour."
         ),
         "input_schema": {
@@ -84,7 +85,8 @@ AGENT_TOOLS: list[dict] = [
             "properties": {
                 "component": {
                     "type": "string",
-                    "enum": ["node", "anvil"],
+                    "enum": ["node", "anvil", "advancer", "claimer", "validator",
+                             "jsonrpc", "evm-reader", "cli", "db"],
                     "description": "Which container to read logs from",
                 },
                 "tail": {
@@ -99,10 +101,11 @@ AGENT_TOOLS: list[dict] = [
     {
         "name": "run_cast_command",
         "description": (
-            "Execute a raw Foundry cast command against the Anvil chain. "
+            "Execute a raw Foundry cast command against the Anvil chain. Runs via "
+            "docker exec inside the sandbox's Anvil container. "
             "Provide everything after 'cast', e.g. 'block-number' or "
-            "'call 0x59b2... \"inputs()\" --rpc-url ...'. "
-            "The --rpc-url flag is added automatically if not present."
+            "'call 0x59b2... \"inputs()\"'. "
+            "--rpc-url http://localhost:8545 is added automatically if not present."
         ),
         "input_schema": {
             "type": "object",
@@ -240,6 +243,179 @@ AGENT_TOOLS: list[dict] = [
                 },
             },
             "required": ["title", "severity", "component", "description"],
+        },
+    },
+    # ── New AI-operator tools (added by AI Session integration) ──────────────
+    {
+        "name": "trigger_test",
+        "description": (
+            "Run a whitelisted test definition with parameter overrides chosen by you. "
+            "Only definitions flagged `ai_allowed: true` are accepted. Overrides are merged "
+            "into the assertion array by leaf-name (e.g. `payload`, `min_count`, `expect_count`). "
+            "Returns once the test completes or `wait_seconds` elapses."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "definition_slug": {
+                    "type": "string",
+                    "description": "The test slug (e.g. 'echo-ping-v2'). See the project knowledge "
+                                   "test-catalog for whitelisted slugs.",
+                },
+                "parameter_overrides": {
+                    "type": "object",
+                    "description": "Map of leaf parameter names to override values "
+                                   "(e.g. {\"payload\": \"0xCAFE\", \"min_count\": 3}).",
+                    "default": {},
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "description": "Seconds to wait for the test result. 0 = fire and forget.",
+                    "default": 90,
+                },
+            },
+            "required": ["definition_slug"],
+        },
+    },
+    {
+        "name": "read_test_definition",
+        "description": (
+            "Fetch the parsed YAML and metadata for a whitelisted test, so you can see what "
+            "parameters are overridable before calling trigger_test."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "definition_slug": {"type": "string"},
+            },
+            "required": ["definition_slug"],
+        },
+    },
+    {
+        "name": "run_cli_command",
+        "description": (
+            "Run a whitelisted binary inside the right sandbox container via docker exec. "
+            "Routing is automatic: `cartesi` (the npm @cartesi/cli) runs in the cli-tools "
+            "container; `cartesi-rollups-cli` runs in the rollups runtime containers "
+            "(advancer/jsonrpc); `cast`/`forge` run in the Anvil (Foundry) container; "
+            "`bash`/`sh` run in the runtime/cli containers respectively. "
+            "Common uses: `cartesi-rollups-cli app status`, "
+            "`cast call <addr> 'sig(args)' <args>` (RPC inside the container is "
+            "http://localhost:8545)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "binary": {
+                    "type": "string",
+                    "enum": ["cartesi", "cartesi-rollups-cli", "cast", "forge", "bash", "sh"],
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Arguments string passed to the binary (shell-split client-side).",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Override the container name (skips automatic routing).",
+                },
+            },
+            "required": ["binary", "args"],
+        },
+    },
+    {
+        "name": "call_jsonrpc",
+        "description": (
+            "Call a cartesi_* JSON-RPC method on the sandbox's JSON-RPC API (port 10011). "
+            "Method must start with `cartesi_`. See the project knowledge "
+            "cartesi-jsonrpc-quickref for the supported methods."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "description": "JSON-RPC method, e.g. 'cartesi_listApplications', "
+                                   "'cartesi_getEpoch', 'cartesi_listOutputs'.",
+                },
+                "params": {
+                    "description": "List or object of params for the method.",
+                },
+            },
+            "required": ["method"],
+        },
+    },
+    {
+        "name": "query_db",
+        "description": (
+            "Run a read-only SQL SELECT against the project's Postgres. The connection runs as "
+            "the `ai_reader` role with SELECT on: tests.definitions, tests.results, "
+            "orchestrator.runs, ai.sessions, ai.tool_invocations, ai.suggested_test_actions. "
+            "Statement timeout 5s; max 200 rows returned. INSERT/UPDATE/DELETE will fail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "A single SELECT statement."},
+            },
+            "required": ["sql"],
+        },
+    },
+    {
+        "name": "provision_sandbox",
+        "description": (
+            "Request a new sandbox from the orchestrator. Returns the new run_id. Use when "
+            "you need a fresh node to bootstrap from scratch — e.g. to reproduce a bug or "
+            "explore startup behavior."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "release_tag":  {"type": "string", "default": "latest"},
+                "image_tag":    {"type": "string", "default": "latest"},
+                "app_id":       {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "teardown_sandbox",
+        "description": (
+            "Cancel an in-progress run so the sandbox-manager frees its containers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
+        "name": "lookup_skill",
+        "description": (
+            "Read a section of a Cartesi Skill markdown for deep knowledge not covered by "
+            "the project knowledge in the system prompt. Call without `section` first to "
+            "list available sections, then call again with the chosen heading."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "enum": [
+                        "cartesi-scaffold", "cartesi-backend-core",
+                        "cartesi-python-backend", "cartesi-js-backend",
+                        "cartesi-frontend", "cartesi-l1-contracts",
+                        "cartesi-jsonrpc", "cartesi-local-dev",
+                        "cartesi-deploy", "cartesi-debug",
+                    ],
+                },
+                "section": {
+                    "type": "string",
+                    "description": "Exact H2 heading text (case-insensitive). Omit to list headings.",
+                },
+            },
+            "required": ["skill_name"],
         },
     },
 ]

@@ -223,13 +223,14 @@ class SandboxEventConsumer:
             suite_ids          = run.suite_ids  if run else None
             node_major_version = run.node_major_version if run else 1
             run_metadata       = run.metadata or {} if run else {}
-            tags_filter        = run_metadata.get("tags_filter")  # e.g. ["restart"]
+            tags_filter      = run_metadata.get("tags_filter")      # e.g. ["restart"]
+            category_filter  = run_metadata.get("category_filter")   # e.g. ["CLI - doctor"]
             # app_address is set by sandbox_queue consumer after deploy; also forwarded
             # from sandbox_msg so we always have the most up-to-date value.
             app_address = (sandbox_msg.get("app_address")
                            or (run.app_address if run else None))
 
-            # Build the definitions query — tag-based filter applied in SQL for efficiency
+            # Build the definitions query — filter applied in SQL for efficiency
             if tags_filter:
                 # Filter: definition tags array overlaps with any of the requested tags
                 all_rows = await db.execute(
@@ -240,6 +241,17 @@ class SandboxEventConsumer:
                         AND tags && CAST(:tag_filter AS text[])
                     """),
                     {"node_version": node_major_version, "tag_filter": tags_filter},
+                )
+            elif category_filter:
+                # Filter: definition category matches one of the requested categories
+                all_rows = await db.execute(
+                    text("""
+                        SELECT id, slug, version FROM tests.definitions
+                        WHERE is_active = true
+                        AND min_node_major_version = :node_version
+                        AND category = ANY(CAST(:cats AS text[]))
+                    """),
+                    {"node_version": node_major_version, "cats": category_filter},
                 )
             else:
                 all_rows = await db.execute(
@@ -262,6 +274,10 @@ class SandboxEventConsumer:
             definitions = all_definitions
             log.info("Tag filter %s: %d definitions selected for run %s",
                      tags_filter, len(definitions), run_id)
+        elif category_filter:
+            definitions = all_definitions
+            log.info("Category filter %s: %d definitions selected for run %s",
+                     category_filter, len(definitions), run_id)
         else:
             definitions = all_definitions
 
@@ -309,14 +325,11 @@ class SandboxEventConsumer:
             await db.execute(
                 text("""
                     UPDATE orchestrator.runs
-                    SET metadata = jsonb_set(
-                        COALESCE(metadata, '{}'),
-                        '{dispatched_count}',
-                        CAST(:count AS jsonb)
-                    )
+                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                   || jsonb_build_object('dispatched_count', CAST(:count AS int))
                     WHERE id = :id
                 """),
-                {"count": str(dispatched), "id": run_id},
+                {"count": dispatched, "id": run_id},
             )
             await db.commit()
 

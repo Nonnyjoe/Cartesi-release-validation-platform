@@ -40,6 +40,11 @@ class SessionRequestConsumer:
                         log.exception("Error handling session request: %s", exc)
 
     async def _handle(self, msg: dict):
+        # Mid-session user message (collaborative/interactive) — not a new session.
+        if msg.get("type") == "user_message":
+            await self.send_user_message(msg.get("session_id", ""), msg.get("message", ""))
+            return
+
         mode = msg.get("mode", "autonomous")
         log.info("AI session request: mode=%s  release=%s", mode, msg.get("release_tag"))
 
@@ -54,10 +59,17 @@ class SessionRequestConsumer:
         elif mode in ("collaborative", "interactive"):
             q: asyncio.Queue = asyncio.Queue()
             self._message_queues[manager.session_id] = q
+
+            async def _run_and_cleanup(coro):
+                try:
+                    await coro
+                finally:
+                    self._message_queues.pop(manager.session_id, None)
+
             if mode == "collaborative":
-                asyncio.create_task(manager.run_collaborative(q))
+                asyncio.create_task(_run_and_cleanup(manager.run_collaborative(q)))
             else:
-                asyncio.create_task(manager.run_interactive(q))
+                asyncio.create_task(_run_and_cleanup(manager.run_interactive(q)))
 
     async def send_user_message(self, session_id: str, message: str):
         """Called by the orchestrator WebSocket to inject user messages into a live session."""

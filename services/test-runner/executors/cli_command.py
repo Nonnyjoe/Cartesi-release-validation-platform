@@ -16,7 +16,9 @@ Assertion YAML:
     expect_exit_code: 0             # default 0 (success)
     expect_output_contains: ""      # optional substring in stdout+stderr
     expect_output_not_contains: ""  # optional: must NOT contain this string
-    timeout: 30                     # seconds (default 30)
+    timeout: 30                     # seconds per attempt (default 30)
+    poll_timeout: 0                 # total retry budget in seconds; 0 = no retry (default)
+    poll_interval: 15               # seconds between retries when poll_timeout > 0 (default 15)
 
 Template variables available in args:
   {anvil_rpc_url}          → container-internal anvil RPC URL (http://rvp-anvil-{short}:8545)
@@ -44,13 +46,15 @@ class CliCommandExecutor(AssertionExecutor):
         return await loop.run_in_executor(None, self._run_sync, assertion, ctx)
 
     def _run_sync(self, assertion: dict, ctx: SandboxContext) -> AssertionResult:
-        args_raw    = assertion.get("args", "")
-        binary      = assertion.get("binary", "cartesi")
-        expect_code = int(assertion.get("expect_exit_code", 0))
-        expect_out  = assertion.get("expect_output_contains", "")
-        expect_not  = assertion.get("expect_output_not_contains", "")
-        timeout_s   = int(assertion.get("timeout", 30))
-        short       = ctx.sandbox_id[:8]
+        args_raw      = assertion.get("args", "")
+        binary        = assertion.get("binary", "cartesi")
+        expect_code   = int(assertion.get("expect_exit_code", 0))
+        expect_out    = assertion.get("expect_output_contains", "")
+        expect_not    = assertion.get("expect_output_not_contains", "")
+        timeout_s     = int(assertion.get("timeout", 30))
+        poll_timeout  = float(assertion.get("poll_timeout", 0))
+        poll_interval = float(assertion.get("poll_interval", 15))
+        short         = ctx.sandbox_id[:8]
 
         # Resolve template variables in args and container fields
         template_vars = {
@@ -77,8 +81,36 @@ class CliCommandExecutor(AssertionExecutor):
         cli_container = container_tpl
 
         cmd = ["docker", "exec", cli_container, binary] + args
-        t0  = time.monotonic()
+        t0       = time.monotonic()
+        deadline = t0 + poll_timeout if poll_timeout > 0 else t0
 
+        last_result: AssertionResult | None = None
+        while True:
+            attempt_result = self._run_once(cmd, binary, args, expect_code,
+                                            expect_out, expect_not, timeout_s, t0)
+            last_result = attempt_result
+            if attempt_result.passed:
+                return attempt_result
+            if poll_timeout <= 0 or time.monotonic() >= deadline:
+                return attempt_result
+            log.debug("cli_command retrying in %.0fs (budget=%.0fs remaining): %s",
+                      poll_interval, deadline - time.monotonic(),
+                      attempt_result.detail[:120])
+            time.sleep(poll_interval)
+
+        return last_result  # unreachable, satisfies type checkers
+
+    def _run_once(
+        self,
+        cmd: list,
+        binary: str,
+        args: list,
+        expect_code: int,
+        expect_out: str,
+        expect_not: str,
+        timeout_s: int,
+        t0: float,
+    ) -> AssertionResult:
         try:
             result = subprocess.run(
                 cmd,

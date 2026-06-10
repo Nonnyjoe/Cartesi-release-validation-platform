@@ -11,7 +11,8 @@ import time
 import logging
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext, SANDBOX_HOST
+from .base import (AssertionExecutor, AssertionResult, SandboxContext, SANDBOX_HOST,
+                   fetch_input_count, count_before_result, count_after_result)
 
 log = logging.getLogger("test-runner.executor.chain")
 
@@ -70,6 +71,8 @@ class ChainTxExecutor(AssertionExecutor):
         t0 = time.monotonic()
 
         if ctx.node_major_version >= 2:
+            before_count = await fetch_input_count(ctx.jsonrpc_rpc_url, ctx.app_address or "app")
+
             last_result = AssertionResult("chain_tx", False, detail="no iterations")
             for i in range(repeat):
                 last_result = await self._submit_v2(
@@ -82,7 +85,9 @@ class ChainTxExecutor(AssertionExecutor):
                         detail=f"[{i+1}/{repeat}] {last_result.detail}",
                         duration_ms=int((time.monotonic() - t0) * 1000),
                     )
-                    return last_result
+                    parts = ([count_before_result("inputs", before_count)]
+                             if before_count >= 0 else [])
+                    return parts + [last_result]
             if repeat > 1:
                 last_result = AssertionResult(
                     assertion_type="chain_tx",
@@ -92,6 +97,22 @@ class ChainTxExecutor(AssertionExecutor):
                     detail=f"Sent {repeat}× InputBox.addInput to {app_addr[:10]}…",
                     duration_ms=int((time.monotonic() - t0) * 1000),
                 )
+            if before_count >= 0:
+                # Poll up to 15s for the evm-reader to index the new input(s)
+                after_count = before_count
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    after_count = await fetch_input_count(
+                        ctx.jsonrpc_rpc_url, ctx.app_address or "app"
+                    )
+                    if after_count > before_count:
+                        break
+                    await asyncio.sleep(2)
+                return [
+                    count_before_result("inputs", before_count),
+                    last_result,
+                    count_after_result("inputs", before_count, after_count),
+                ]
             return last_result
         else:
             return await self._submit_v1(payload, ctx, t0)

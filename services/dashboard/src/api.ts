@@ -1,8 +1,8 @@
 import type {
-  Run, RunReport, RunEvent, RunLogLine, TestDefinition, Sandbox,
+  Run, RunReport, RunEvent, RunLogLine, TestDefinition, PhaseGroup, Sandbox,
   AISession, SuggestedAction, PaginatedResponse, QueueDepths,
   ReleaseEntry, CliRelease, SdkRelease, ContractsRelease,
-  Application,
+  Application, ToolInvocation,
 } from './types'
 
 const BASE = '/api'
@@ -35,6 +35,7 @@ export const runsApi = {
     triggered_by?:      string
     triggered_by_user?: string
     app_id?:            string
+    category_filter?:   string[]
   }) =>
     request<Run>('/runs', {
       method: 'POST',
@@ -74,13 +75,20 @@ export const runsApi = {
 
 // ─── Test definitions ─────────────────────────────────────────────────────────
 export const testsApi = {
-  list: () => request<TestDefinition[]>('/tests'),
+  list: (params: { ai_allowed?: boolean } = {}) => {
+    const qs = params.ai_allowed !== undefined ? `?ai_allowed=${params.ai_allowed}` : ''
+    return request<TestDefinition[]>(`/tests${qs}`)
+  },
   get: (id: string) => request<TestDefinition>(`/tests/${id}`),
+  /** Returns phase/category groups with counts for accordion UIs. */
+  categories: () => request<PhaseGroup[]>('/tests/categories'),
   /** content must be YAML-frontmatter + markdown body, e.g. "---\nid: ...\n---\nDescription" */
   create: (content: string) =>
     request<TestDefinition>('/tests', { method: 'POST', body: JSON.stringify({ content }) }),
   toggle: (id: string, is_active: boolean) =>
     request<TestDefinition>(`/tests/${id}`, { method: 'PATCH', body: JSON.stringify({ is_active }) }),
+  toggleAiAllowed: (id: string, ai_allowed: boolean) =>
+    request<TestDefinition>(`/tests/${id}`, { method: 'PATCH', body: JSON.stringify({ ai_allowed }) }),
 }
 
 // ─── Sandboxes ────────────────────────────────────────────────────────────────
@@ -95,10 +103,12 @@ export const sessionsApi = {
     request<PaginatedResponse<AISession>>(`/sessions?page=${page}&page_size=${pageSize}`),
   get: (id: string) => request<AISession>(`/sessions/${id}`),
   create: (payload: {
-    mode:       string
-    run_id?:    string
-    goal?:      string
-    sandbox_id?: string
+    mode:               string
+    run_id?:            string
+    goal?:              string
+    sandbox_id?:        string
+    anthropic_api_key:  string
+    model_id?:          string
   }) => request<AISession>('/sessions', { method: 'POST', body: JSON.stringify(payload) }),
   sendMessage: (id: string, message: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/message`, {
@@ -107,6 +117,8 @@ export const sessionsApi = {
     }),
   cancel: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}/cancel`, { method: 'POST' }),
+  tools: (id: string, limit = 200) =>
+    request<ToolInvocation[]>(`/sessions/${id}/tools?limit=${limit}`),
   suggestions: (sessionId?: string) => {
     const q = sessionId ? `?session_id=${sessionId}` : ''
     return request<SuggestedAction[]>(`/sessions/suggestions${q}`)

@@ -13,31 +13,42 @@ log = logging.getLogger("ai-agent.tools.node")
 
 async def read_logs(
     sandbox_id: str,
-    component: str = "node",
+    component: str = "advancer",
     tail: int = 100,
 ) -> dict[str, Any]:
     """
-    Read stdout/stderr logs from a named sandbox container.
-    component: 'node' | 'anvil'
+    Read stdout/stderr logs from a sandbox container.
+    component: advancer | claimer | validator | jsonrpc | evm-reader | anvil | cli | db | node
+    'node' falls back to 'advancer' for v2.x sandboxes (no monolithic node container).
     """
-    container_name = f"rvp-{component}-{sandbox_id[:8]}"
-    try:
-        client = docker.from_env()
-        container = client.containers.get(container_name)
-        raw = container.logs(stdout=True, stderr=True, tail=tail)
-        lines = raw.decode("utf-8", errors="replace").splitlines()
-        return {
-            "success": True,
-            "container": container_name,
-            "component": component,
-            "lines": lines,
-            "line_count": len(lines),
-        }
-    except docker.errors.NotFound:
-        return {"success": False, "error": f"Container '{container_name}' not found"}
-    except Exception as exc:
-        log.warning("read_logs error: %s", exc)
-        return {"success": False, "error": str(exc)}
+    short = sandbox_id[:8] if sandbox_id else ""
+    if component == "node":
+        candidates = [f"rvp-node-{short}", f"rvp-advancer-{short}", f"rvp-jsonrpc-{short}"]
+    elif component == "jsonrpc":
+        candidates = [f"rvp-jsonrpc-{short}", f"rvp-jsonrpc-api-{short}"]
+    else:
+        candidates = [f"rvp-{component}-{short}"]
+
+    client = docker.from_env()
+    for name in candidates:
+        try:
+            container = client.containers.get(name)
+            raw = container.logs(stdout=True, stderr=True, tail=tail)
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            return {
+                "success":    True,
+                "container":  name,
+                "component":  component,
+                "lines":      lines,
+                "line_count": len(lines),
+            }
+        except docker.errors.NotFound:
+            continue
+        except Exception as exc:
+            log.warning("read_logs error on %s: %s", name, exc)
+            return {"success": False, "error": str(exc), "container": name}
+
+    return {"success": False, "error": f"No matching container. Tried: {candidates}"}
 
 
 async def get_node_state(

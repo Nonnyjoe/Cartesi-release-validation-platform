@@ -1,5 +1,6 @@
 ---
 id: graphql-inputs-query
+ai_allowed: true
 name: GraphQL Inputs Query (Multiple Inputs)
 version: 1
 tags: [graphql, core, indexer]

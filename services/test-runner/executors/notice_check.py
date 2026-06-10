@@ -18,7 +18,7 @@ import logging
 import time
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext
+from .base import AssertionExecutor, AssertionResult, SandboxContext, count_before_result, count_after_result
 
 log = logging.getLogger("test-runner.executor.notice_check")
 
@@ -36,6 +36,9 @@ class NoticeCheckExecutor(AssertionExecutor):
         rpc_url = ctx.jsonrpc_rpc_url
         t0      = time.monotonic()
         deadline = t0 + poll_timeout
+
+        before_count: int | None = None  # notice count at assertion start
+        last_count   = 0                 # most recent count seen
 
         while time.monotonic() < deadline:
             try:
@@ -81,6 +84,11 @@ class NoticeCheckExecutor(AssertionExecutor):
                             return False
                     matching = [o for o in notices if _matches(o)]
 
+                # Capture the initial count on the first successful poll
+                if before_count is None:
+                    before_count = len(matching)
+                last_count = len(matching)
+
                 duration_ms = int((time.monotonic() - t0) * 1000)
 
                 if len(matching) >= min_count:
@@ -92,14 +100,20 @@ class NoticeCheckExecutor(AssertionExecutor):
                         ).decode("utf-8", errors="replace")[:120]
                     except Exception:
                         decoded = payload_hex[:120]
-                    return AssertionResult(
+                    after_count = len(matching)
+                    main = AssertionResult(
                         assertion_type="notice_check",
                         passed=True,
                         expected=f">= {min_count} notice(s)",
-                        actual=f"{len(matching)} matching notice(s)",
-                        detail=f"First notice: {decoded}",
+                        actual=f"{after_count} matching notice(s)",
+                        detail=f"Found {after_count} notice(s) (expected >= {min_count}) | First: {decoded}",
                         duration_ms=duration_ms,
                     )
+                    return [
+                        count_before_result("notices", before_count),
+                        main,
+                        count_after_result("notices", before_count, after_count, require_increase=False),
+                    ]
 
             except Exception as exc:
                 log.debug("notice_check poll error: %s", exc)
@@ -107,11 +121,19 @@ class NoticeCheckExecutor(AssertionExecutor):
             await asyncio.sleep(poll_interval)
 
         duration_ms = int((time.monotonic() - t0) * 1000)
-        return AssertionResult(
+        bc = before_count if before_count is not None else -1
+        main = AssertionResult(
             assertion_type="notice_check",
             passed=False,
             expected=f">= {min_count} notice(s)" + (f" containing {contains_text!r}" if contains_text else ""),
-            actual="0 matching notices after timeout",
-            detail=f"Timed out after {poll_timeout}s waiting for notices",
+            actual=f"{last_count} matching notices after timeout",
+            detail=f"Timed out after {poll_timeout}s — last seen: {last_count} (expected >= {min_count})",
             duration_ms=duration_ms,
         )
+        if bc >= 0:
+            return [
+                count_before_result("notices", bc),
+                main,
+                count_after_result("notices", bc, last_count, require_increase=False),
+            ]
+        return main

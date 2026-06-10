@@ -199,6 +199,9 @@ CREATE TABLE tests.definitions (
   definition_raw      TEXT NOT NULL,
   definition_parsed   JSONB NOT NULL,
   is_active           BOOLEAN NOT NULL DEFAULT true,
+  ai_allowed          BOOLEAN NOT NULL DEFAULT false,
+  category            TEXT,
+  phase               TEXT,
   created_by          TEXT,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -207,6 +210,9 @@ CREATE TABLE tests.definitions (
 CREATE INDEX idx_definitions_tags ON tests.definitions USING GIN (tags);
 CREATE INDEX idx_definitions_is_active ON tests.definitions (is_active);
 CREATE INDEX idx_definitions_component ON tests.definitions (component);
+CREATE INDEX idx_definitions_category ON tests.definitions (category);
+CREATE INDEX idx_definitions_phase    ON tests.definitions (phase);
+CREATE INDEX idx_definitions_ai_allowed ON tests.definitions (ai_allowed) WHERE ai_allowed = true;
 
 CREATE TABLE tests.definition_versions (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -259,11 +265,43 @@ CREATE TABLE ai.sessions (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ,
   total_tokens     INTEGER,
-  tool_call_count  INTEGER DEFAULT 0
+  tool_call_count  INTEGER DEFAULT 0,
+  anthropic_key_ciphertext BYTEA,
+  anthropic_key_nonce      BYTEA,
+  model_id                 TEXT DEFAULT 'claude-opus-4-6'
 );
 
 CREATE INDEX idx_ai_sessions_run_id ON ai.sessions (run_id);
 CREATE INDEX idx_ai_sessions_status ON ai.sessions (status);
+
+CREATE TABLE ai.tool_invocations (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id   UUID NOT NULL REFERENCES ai.sessions (id) ON DELETE CASCADE,
+  tool_name    TEXT NOT NULL,
+  input        JSONB NOT NULL,
+  output       JSONB,
+  status       TEXT NOT NULL,
+  duration_ms  INTEGER,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_tool_inv_session ON ai.tool_invocations (session_id);
+CREATE INDEX idx_tool_inv_created ON ai.tool_invocations (created_at DESC);
+
+-- Must be LOGIN + password so the ai-agent's query_db tool can connect
+-- (matches AI_READER_DATABASE_URL in docker-compose.yml and migration 0012).
+DO $$ BEGIN
+  CREATE ROLE ai_reader WITH LOGIN PASSWORD 'ai_reader_changeme';
+EXCEPTION WHEN duplicate_object THEN
+  ALTER ROLE ai_reader WITH LOGIN PASSWORD 'ai_reader_changeme';
+END $$;
+
+GRANT USAGE ON SCHEMA tests TO ai_reader;
+GRANT USAGE ON SCHEMA orchestrator TO ai_reader;
+GRANT USAGE ON SCHEMA ai TO ai_reader;
+GRANT SELECT ON tests.definitions, tests.results TO ai_reader;
+GRANT SELECT ON orchestrator.runs TO ai_reader;
+GRANT SELECT ON ai.sessions, ai.tool_invocations, ai.suggested_test_actions TO ai_reader;
 
 CREATE TABLE ai.analyses (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

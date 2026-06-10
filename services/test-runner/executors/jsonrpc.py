@@ -31,7 +31,7 @@ import time
 import logging
 import httpx
 
-from .base import AssertionExecutor, AssertionResult, SandboxContext
+from .base import AssertionExecutor, AssertionResult, SandboxContext, count_before_result, count_after_result
 
 log = logging.getLogger("test-runner.executor.jsonrpc")
 
@@ -67,6 +67,8 @@ class JsonRpcExecutor(AssertionExecutor):
         pagination_offset  = assertion.get("pagination_offset")
         expect_has_field   = assertion.get("expect_has_field")
         use_last_epoch     = assertion.get("use_last_epoch", False)
+        poll_timeout       = float(assertion.get("poll_timeout", 60))
+        poll_interval      = float(assertion.get("poll_interval", 2))
 
         app_id = (ctx.app_address or "app") if use_app_addr else None
 
@@ -90,26 +92,43 @@ class JsonRpcExecutor(AssertionExecutor):
         t0 = time.monotonic()
         url = ctx.jsonrpc_rpc_url
 
-        # use_last_epoch: first fetch the last accepted epoch index, then inject it
-        # into params as the epoch_index parameter (hex string format required).
+        # use_last_epoch: poll cartesi_getLastAcceptedEpochIndex until an epoch
+        # is accepted, then inject the epoch index into params.
+        # Polls up to poll_timeout seconds (default 60) so early-running tests
+        # wait for the claimer to accept at least one epoch.
         if use_last_epoch and app_id:
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    r = await client.post(url, json={
-                        "jsonrpc": "2.0",
-                        "method": "cartesi_getLastAcceptedEpochIndex",
-                        "params": [app_id],
-                        "id": 99,
-                    }, headers={"Content-Type": "application/json"})
-                    epoch_resp = r.json()
-                    epoch_idx = epoch_resp.get("result", {}).get("data")
-                    if epoch_idx:
-                        if isinstance(params, list):
-                            params.append(epoch_idx)
-                        else:
-                            params["epoch_index"] = epoch_idx
-            except Exception as exc:
-                log.warning("use_last_epoch fetch failed: %s", exc)
+            epoch_idx = None
+            epoch_deadline = time.monotonic() + poll_timeout
+            while True:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.post(url, json={
+                            "jsonrpc": "2.0",
+                            "method": "cartesi_getLastAcceptedEpochIndex",
+                            "params": [app_id],
+                            "id": 99,
+                        }, headers={"Content-Type": "application/json"})
+                        epoch_resp = r.json()
+                        if "error" not in epoch_resp:
+                            epoch_idx = epoch_resp.get("result", {}).get("data")
+                except Exception as exc:
+                    log.warning("use_last_epoch fetch failed: %s", exc)
+
+                if epoch_idx is not None:
+                    break
+                if time.monotonic() >= epoch_deadline:
+                    log.warning("use_last_epoch: no accepted epoch within %.0fs", poll_timeout)
+                    break
+                await asyncio.sleep(poll_interval)
+
+            if epoch_idx is not None:
+                # API expects hex string; convert integer (e.g. 0) if needed.
+                if isinstance(epoch_idx, int):
+                    epoch_idx = hex(epoch_idx)
+                if isinstance(params, list):
+                    params.append(epoch_idx)
+                else:
+                    params["epoch_index"] = epoch_idx
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -202,12 +221,42 @@ class JsonRpcExecutor(AssertionExecutor):
 
             if "error" in body:
                 err = body["error"]
-                return AssertionResult(
-                    assertion_type="json_rpc",
-                    passed=False,
-                    detail=f"{method} error: {err.get('message', err)}",
-                    duration_ms=int((time.monotonic() - t0) * 1000),
-                )
+                # For expect_has_field: the field may not exist yet (e.g., no
+                # accepted epoch yet). Poll until available or timeout expires.
+                if expect_has_field and time.monotonic() < t0 + poll_timeout:
+                    await asyncio.sleep(poll_interval)
+                    async with httpx.AsyncClient(timeout=20.0) as _pc:
+                        _pr = await _pc.post(
+                            url,
+                            json={"jsonrpc": "2.0", "method": method,
+                                  "params": params, "id": 1},
+                            headers={"Content-Type": "application/json"},
+                        )
+                        body = _pr.json()
+                        while "error" in body and time.monotonic() < t0 + poll_timeout:
+                            await asyncio.sleep(poll_interval)
+                            _pr = await _pc.post(
+                                url,
+                                json={"jsonrpc": "2.0", "method": method,
+                                      "params": params, "id": 1},
+                                headers={"Content-Type": "application/json"},
+                            )
+                            body = _pr.json()
+                    if "error" in body:
+                        err2 = body["error"]
+                        return AssertionResult(
+                            assertion_type="json_rpc",
+                            passed=False,
+                            detail=f"{method} error: {err2.get('message', err2)}",
+                            duration_ms=int((time.monotonic() - t0) * 1000),
+                        )
+                else:
+                    return AssertionResult(
+                        assertion_type="json_rpc",
+                        passed=False,
+                        detail=f"{method} error: {err.get('message', err)}",
+                        duration_ms=int((time.monotonic() - t0) * 1000),
+                    )
 
             result = body.get("result", {})
 
@@ -223,28 +272,65 @@ class JsonRpcExecutor(AssertionExecutor):
                     duration_ms=int((time.monotonic() - t0) * 1000),
                 )
 
-            # Count check
+            # Count check — poll until satisfied, tracking before → after
             if expect_count is not None or expect_count_exact is not None:
-                data = result.get("data", [])
-                actual_count = len(data)
+                first_param = (
+                    params[0] if isinstance(params, list) and params
+                    else (params.get("application", "") if isinstance(params, dict) else "")
+                )
                 if expect_count_exact is not None:
-                    passed = actual_count == expect_count_exact
-                    exp_str = f"== {expect_count_exact} items"
+                    exp_str  = f"== {expect_count_exact} items"
+                    _target  = expect_count_exact
+                    _check   = lambda n: n == expect_count_exact  # noqa: E731
                 else:
-                    passed = actual_count >= expect_count
-                    exp_str = f">= {expect_count} items"
-                first_param = params[0] if isinstance(params, list) and params else (params.get("application", "") if isinstance(params, dict) else "")
-                return AssertionResult(
+                    exp_str  = f">= {expect_count} items"
+                    _target  = expect_count
+                    _check   = lambda n: n >= expect_count  # noqa: E731
+
+                # First query already ran above → use it as before_count
+                before_count = len(result.get("data", []))
+                after_count  = before_count
+                deadline     = time.monotonic() + poll_timeout
+
+                if not _check(before_count):
+                    # Poll until satisfied or timeout
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(poll_interval)
+                        try:
+                            async with httpx.AsyncClient(timeout=20.0) as _pc:
+                                _pr = await _pc.post(
+                                    url,
+                                    json={"jsonrpc": "2.0", "method": method,
+                                          "params": params, "id": 1},
+                                    headers={"Content-Type": "application/json"},
+                                )
+                                _pr.raise_for_status()
+                                _pb = _pr.json()
+                            if "error" in _pb:
+                                break
+                            after_count = len(_pb.get("result", {}).get("data", []))
+                            if _check(after_count):
+                                break
+                        except Exception:
+                            pass  # keep polling on transient errors
+
+                passed = _check(after_count)
+                main = AssertionResult(
                     assertion_type="json_rpc",
                     passed=passed,
                     expected=exp_str,
-                    actual=f"{actual_count} items",
+                    actual=f"{after_count} items",
                     detail=(
-                        f"{method}({first_param}) → "
-                        f"{actual_count} items (expected {exp_str})"
+                        f"{method}({first_param}) — {after_count} item(s) (expected {exp_str})"
+                        + ("" if passed else f" — timed out after {int(poll_timeout)}s")
                     ),
                     duration_ms=int((time.monotonic() - t0) * 1000),
                 )
+                return [
+                    count_before_result(method, before_count),
+                    main,
+                    count_after_result(method, before_count, after_count, require_increase=False),
+                ]
 
             # Path + value check
             if path:

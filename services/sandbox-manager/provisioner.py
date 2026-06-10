@@ -587,6 +587,10 @@ class SandboxProvisioner:
             name=f"rvp-anvil-{sandbox_id[:8]}",
             network=network,
             ports={"8545/tcp": port},
+            # Use Google DNS so containers sharing this network namespace
+            # (cannon-deployer, token-deployer) can resolve external hostnames like
+            # codeload.github.com. The host DNS server can return SERVFAIL for this.
+            dns=["8.8.8.8", "8.8.4.4"],
             detach=True,
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "anvil"},

@@ -83,11 +83,28 @@ export interface TestDefinition {
   priority:        string
   component?:      string
   is_active:       boolean
+  ai_allowed:      boolean
   tags:            string[]
   timeout_seconds: number
   definition_raw:  string
+  category?:       string
+  phase?:          string
   created_at:      string
   updated_at:      string
+}
+
+/** One category within a phase, with test counts */
+export interface CategoryEntry {
+  category:     string
+  count:        number
+  active_count: number
+}
+
+/** A phase group returned by GET /tests/categories */
+export interface PhaseGroup {
+  phase:        string
+  phase_number: number
+  categories:   CategoryEntry[]
 }
 
 /** Matches sandbox.sandboxes row */
@@ -128,6 +145,17 @@ export interface Finding {
   description: string
   evidence?: string
   recommendation?: string
+}
+
+/** Matches ai.tool_invocations row */
+export interface ToolInvocation {
+  id:           string
+  tool_name:    string
+  input:        Record<string, unknown>
+  output:       unknown
+  status:       'ok' | 'error' | 'denied'
+  duration_ms:  number
+  created_at:   string
 }
 
 export interface SuggestedAction {

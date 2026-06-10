@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-list-outputs-v2
+ai_allowed: true
 name: cartesi_listOutputs pagination and type/address filter (v2.x)
 version: 1
 min_node_major_version: 2

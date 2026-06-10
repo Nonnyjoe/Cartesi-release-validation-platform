@@ -1,17 +1,18 @@
 """
-GET  /tests          — list all test definitions
-GET  /tests/{id}     — get single definition
-POST /tests          — create a new definition from YAML+MD content
-PATCH /tests/{id}    — toggle is_active
+GET  /tests             — list all test definitions (optional ?category= ?phase= filters)
+GET  /tests/categories  — grouped phase/category counts for accordion UI
+GET  /tests/{id}        — get single definition
+POST /tests             — create a new definition from YAML+MD content
+PATCH /tests/{id}       — toggle is_active
 """
 import json
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import yaml
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,9 +32,12 @@ class TestDefinitionOut(BaseModel):
     priority: str
     component: Optional[str] = None
     is_active: bool
+    ai_allowed: bool = False
     tags: list[str]
     timeout_seconds: int
     definition_raw: str
+    category: Optional[str] = None
+    phase: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -44,6 +48,19 @@ class TestCreateIn(BaseModel):
 
 class TestPatchIn(BaseModel):
     is_active: Optional[bool] = None
+    ai_allowed: Optional[bool] = None
+
+
+class CategoryEntry(BaseModel):
+    category: str
+    count: int
+    active_count: int
+
+
+class PhaseGroup(BaseModel):
+    phase: str
+    phase_number: int
+    categories: List[CategoryEntry]
 
 
 def _row_to_out(row) -> dict:
@@ -55,18 +72,79 @@ def _row_to_out(row) -> dict:
         "priority": row.priority,
         "component": row.component,
         "is_active": row.is_active,
+        "ai_allowed": bool(getattr(row, "ai_allowed", False)),
         "tags": list(row.tags) if row.tags else [],
         "timeout_seconds": row.timeout_seconds,
         "definition_raw": row.definition_raw,
+        "category": row.category,
+        "phase": row.phase,
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }
 
 
-@router.get("", response_model=list[TestDefinitionOut])
-async def list_definitions(db: AsyncSession = Depends(get_db)):
+def _phase_number(phase: str) -> int:
+    """Extract leading integer from 'Phase N: ...' strings for sorting."""
+    m = re.match(r"Phase\s+(\d+)", phase or "")
+    return int(m.group(1)) if m else 9999
+
+
+@router.get("/categories", response_model=List[PhaseGroup])
+async def list_categories(db: AsyncSession = Depends(get_db)):
+    """Return tests grouped by phase then category with counts, for accordion UIs."""
     result = await db.execute(
-        text("SELECT * FROM tests.definitions ORDER BY name")
+        text("""
+            SELECT phase, category,
+                   COUNT(*)                            AS count,
+                   COUNT(*) FILTER (WHERE is_active)  AS active_count
+            FROM tests.definitions
+            WHERE phase IS NOT NULL AND category IS NOT NULL
+            GROUP BY phase, category
+            ORDER BY phase, category
+        """)
+    )
+    rows = result.fetchall()
+
+    phases: dict[str, dict] = {}
+    for row in rows:
+        if row.phase not in phases:
+            phases[row.phase] = {
+                "phase": row.phase,
+                "phase_number": _phase_number(row.phase),
+                "categories": [],
+            }
+        phases[row.phase]["categories"].append({
+            "category": row.category,
+            "count": row.count,
+            "active_count": row.active_count,
+        })
+
+    return sorted(phases.values(), key=lambda p: p["phase_number"])
+
+
+@router.get("", response_model=list[TestDefinitionOut])
+async def list_definitions(
+    category: Optional[str] = Query(None),
+    phase: Optional[str] = Query(None),
+    ai_allowed: Optional[bool] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    clauses: list[str] = []
+    params: dict = {}
+    if category:
+        clauses.append("category = :cat")
+        params["cat"] = category
+    if phase:
+        clauses.append("phase = :phase")
+        params["phase"] = phase
+    if ai_allowed is not None:
+        clauses.append("ai_allowed = :aa")
+        params["aa"] = ai_allowed
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    result = await db.execute(
+        text(f"SELECT * FROM tests.definitions {where} ORDER BY name"),
+        params,
     )
     return [_row_to_out(r) for r in result.fetchall()]
 
@@ -114,11 +192,11 @@ async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_d
             INSERT INTO tests.definitions
                 (id, slug, name, version, tags, component, priority,
                  timeout_seconds, release_introduced, definition_raw, definition_parsed,
-                 is_active, created_at, updated_at)
+                 category, phase, is_active, created_at, updated_at)
             VALUES
                 (:id, :slug, :name, :version, :tags, :component, CAST(:priority AS test_priority),
                  :timeout_seconds, :release_introduced, :definition_raw, CAST(:definition_parsed AS jsonb),
-                 true, :now, :now)
+                 :category, :phase, true, :now, :now)
         """),
         {
             "id": definition_id,
@@ -132,6 +210,8 @@ async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_d
             "release_introduced": meta.get("release_introduced"),
             "definition_raw": body.content,
             "definition_parsed": json.dumps(meta),
+            "category": meta.get("category"),
+            "phase": meta.get("phase"),
             "now": now,
         },
     )
@@ -148,17 +228,21 @@ async def create_definition(body: TestCreateIn, db: AsyncSession = Depends(get_d
 async def patch_definition(
     definition_id: str, body: TestPatchIn, db: AsyncSession = Depends(get_db)
 ):
-    if body.is_active is None:
+    sets: list[str] = []
+    params: dict = {"id": definition_id, "now": datetime.now(timezone.utc)}
+    if body.is_active is not None:
+        sets.append("is_active = :is_active")
+        params["is_active"] = body.is_active
+    if body.ai_allowed is not None:
+        sets.append("ai_allowed = :ai_allowed")
+        params["ai_allowed"] = body.ai_allowed
+    if not sets:
         raise HTTPException(422, "Nothing to update")
 
+    sets.append("updated_at = :now")
     result = await db.execute(
-        text("""
-            UPDATE tests.definitions
-            SET is_active = :is_active, updated_at = :now
-            WHERE id = :id
-            RETURNING *
-        """),
-        {"is_active": body.is_active, "now": datetime.now(timezone.utc), "id": definition_id},
+        text(f"UPDATE tests.definitions SET {', '.join(sets)} WHERE id = :id RETURNING *"),
+        params,
     )
     row = result.fetchone()
     if not row:

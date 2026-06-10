@@ -1,5 +1,6 @@
 ---
 id: jsonrpc-get-application-v2
+ai_allowed: true
 name: cartesi_getApplication fetch by hex address (v2.x)
 version: 1
 min_node_major_version: 2
