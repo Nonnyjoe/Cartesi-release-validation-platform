@@ -51,10 +51,6 @@ def render(architecture, graphql_schema, inspect_api, component_map,
 
 {release_context}
 {sandbox_info}{custom_goal}
-## System Architecture
-
-{architecture}
-
 ## Project Knowledge
 
 {project_knowledge}

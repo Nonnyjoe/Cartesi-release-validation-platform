@@ -91,8 +91,9 @@ AGENT_TOOLS: list[dict] = [
                 },
                 "tail": {
                     "type": "integer",
-                    "description": "Number of log lines to retrieve (default 100)",
-                    "default": 100,
+                    "description": "Number of log lines to retrieve (default 50; "
+                                   "keep small — large outputs are truncated)",
+                    "default": 50,
                 },
             },
             "required": ["component"],
@@ -105,7 +106,11 @@ AGENT_TOOLS: list[dict] = [
             "docker exec inside the sandbox's Anvil container. "
             "Provide everything after 'cast', e.g. 'block-number' or "
             "'call 0x59b2... \"inputs()\"'. "
-            "--rpc-url http://localhost:8545 is added automatically if not present."
+            "For node-querying subcommands (block-number, block, call, send, balance, "
+            "code, nonce, gas-price, chain-id, tx, receipt, logs, estimate, rpc, etc.) "
+            "--rpc-url http://localhost:8545 is added automatically. "
+            "For pure-utility subcommands (to-dec, to-hex, to-wei, keccak, abi-encode, "
+            "abi-decode, sig, address-zero, etc.) no --rpc-url is added — those reject it."
         ),
         "input_schema": {
             "type": "object",
@@ -289,6 +294,117 @@ AGENT_TOOLS: list[dict] = [
                 "definition_slug": {"type": "string"},
             },
             "required": ["definition_slug"],
+        },
+    },
+    {
+        "name": "record_test_verdict",
+        "description": (
+            "Record YOUR OWN pass/fail judgment for a test you executed manually "
+            "(manual-execution sessions). Call this exactly once per test, after you have "
+            "read its definition, executed every step yourself with primitive tools, and "
+            "compared what you observed against the definition's Expected Behaviour. "
+            "Verdicts: 'passed' (all expectations met), 'failed' (node behaviour deviates — "
+            "also call report_finding), 'blocked' (a precondition or environment problem "
+            "prevented execution), 'skipped' (deliberately not executed — say why), "
+            "'inconclusive' (executed but evidence is insufficient to judge). "
+            "An EXECUTION TRAIL (every tool call you made for this test, with exact "
+            "inputs/outputs) is captured automatically and attached to the verdict — do "
+            "NOT paste raw tool outputs, logs or transcripts into evidence. Keep evidence "
+            "to judgment essentials: expected vs observed values, and the one or two "
+            "decisive facts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "definition_slug": {
+                    "type": "string",
+                    "description": "Slug of the test this verdict is for.",
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": ["passed", "failed", "blocked", "skipped", "inconclusive"],
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why you reached this verdict: expected vs observed behaviour. "
+                                   "2-4 sentences.",
+                },
+                "inputs_used": {
+                    "type": "object",
+                    "description": "The inputs you CHOSE (payloads, amounts, args) and the "
+                                   "rationale for choosing them. Literal values only — the "
+                                   "trail captures the full commands.",
+                },
+                "evidence": {
+                    "type": "object",
+                    "description": "Judgment essentials only (expected vs observed, decisive "
+                                   "values). The full execution trail is auto-attached. "
+                                   "Cite at least one concrete value (tx hash, returned value) "
+                                   "that appears in your tool outputs — it is cross-checked "
+                                   "against the trail.",
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Your confidence in this verdict, 0.0–1.0. REQUIRED for "
+                                   "'passed'/'failed'. Below ~0.6 routes the verdict to human "
+                                   "review. Be honest — low confidence is not a failure.",
+                },
+                "observations": {
+                    "type": "array",
+                    "description": "Your key interpretations, one per decisive point — what a "
+                                   "value MEANT, not the raw value (e.g. 'voucher value=0x0 means "
+                                   "the withdraw moved no ETH'). Distinct from raw tool output.",
+                    "items": {"type": "string"},
+                },
+                "duration_ms": {
+                    "type": "integer",
+                    "description": "Approximate wall-clock time you spent on this test.",
+                },
+            },
+            "required": ["definition_slug", "verdict", "reasoning"],
+        },
+    },
+    {
+        "name": "record_test_plan",
+        "description": (
+            "Persist your understanding + plan for a test BEFORE you execute it "
+            "(manual-execution sessions). Call this once per test, right after "
+            "read_test_definition and before any execution step. It is your proof "
+            "that you understood the test and a structured audit record. Cheap — one "
+            "call, then execute."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "definition_slug": {"type": "string", "description": "Slug of the test."},
+                "objective": {
+                    "type": "string",
+                    "description": "What this test verifies about the node, in your own words.",
+                },
+                "success_criteria": {
+                    "type": "string",
+                    "description": "Exactly what you must observe for a PASS.",
+                },
+                "failure_criteria": {
+                    "type": "string",
+                    "description": "What would constitute a node FAIL (vs a dApp-by-design "
+                                   "reject or an environment block).",
+                },
+                "planned_steps": {
+                    "type": "array",
+                    "description": "Ordered steps you intend to run.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "intent": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "input_rationale": {"type": "string"},
+                            "expected_observation": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["definition_slug", "objective"],
         },
     },
     {

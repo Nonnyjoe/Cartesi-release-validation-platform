@@ -39,6 +39,9 @@ DATABASE_URL     = os.environ.get("DATABASE_URL", "").replace(
 )
 NODE_READY_DELAY = int(os.environ.get("NODE_READY_DELAY", "15"))
 V2_READY_TIMEOUT = int(os.environ.get("V2_READY_TIMEOUT", "120"))
+# AI-session bootstrap runs: how long to keep the sandbox if no session ever
+# becomes active (e.g. the ai-agent service is down).
+AI_SESSION_START_GRACE_S = int(os.environ.get("AI_SESSION_START_GRACE_S", "900"))
 GC_INTERVAL      = int(os.environ.get("GC_INTERVAL_SECONDS", "600"))
 
 engine       = create_async_engine(DATABASE_URL, echo=False)
@@ -287,6 +290,41 @@ class SandboxQueueConsumer:
             log.warning("Could not check run cancellation for %s: %s", run_id, exc)
             return False
 
+    async def _is_ai_session_run(self, run_id: str) -> bool:
+        """True when this run was queued by POST /sessions with bootstrap=true."""
+        try:
+            async with SessionLocal() as db:
+                row = await db.execute(
+                    text("""
+                        SELECT jsonb_typeof(metadata) = 'object'
+                               AND COALESCE((metadata->>'ai_session')::bool, false)
+                        FROM orchestrator.runs WHERE id = :id
+                    """),
+                    {"id": run_id},
+                )
+                return bool(row.scalar())
+        except Exception as exc:
+            log.warning("Could not check ai_session flag for run %s: %s", run_id, exc)
+            return False
+
+    async def _ai_session_counts(self, run_id: str) -> tuple[bool, bool]:
+        """(any session exists for this run, any of them still starting/active)."""
+        try:
+            async with SessionLocal() as db:
+                row = await db.execute(
+                    text("""
+                        SELECT COUNT(*) AS total,
+                               COUNT(*) FILTER (WHERE status IN ('starting','active')) AS live
+                        FROM ai.sessions WHERE run_id = :id
+                    """),
+                    {"id": run_id},
+                )
+                r = row.fetchone()
+                return (bool(r and r.total), bool(r and r.live))
+        except Exception as exc:
+            log.warning("Could not check AI sessions for run %s: %s", run_id, exc)
+            return (True, True)   # fail safe: treat as live so the sandbox stays up
+
     # ── Sandbox lifecycle ──────────────────────────────────────────────────────
 
     async def _handle(self, msg: dict):
@@ -414,6 +452,23 @@ class SandboxQueueConsumer:
 
             # ── Mark ready — Fix 2: persist snapshot_volume to DB ─────────────
             app_address = info.get("app_address")
+            # Deployment manifest for consumers (AI sessions read these keys
+            # from metadata to build the per-sandbox system-prompt manifest —
+            # key names must match SessionManager._sandbox_manifest()).
+            sandbox_meta = {
+                "app_address":            app_address,
+                "app_name":               info.get("app_name"),
+                "inputbox_address":       info.get("inputbox_address"),
+                "ether_portal_address":   info.get("ether_portal_address"),
+                "erc20_portal_address":   info.get("erc20_portal_address"),
+                "erc721_portal_address":  info.get("erc721_portal_address"),
+                "erc1155_portal_address": info.get("erc1155_portal_address"),
+                "erc20_token_address":    info.get("erc20_token_address"),
+                "erc721_token_address":   info.get("erc721_token_address"),
+                "erc1155_token_address":  info.get("erc1155_token_address"),
+                "cli_container_name":     info.get("cli_container_name"),
+                "node_major_version":     node_major_version,
+            }
             async with SessionLocal() as db:
                 await _upsert_sandbox(db, sandbox_id, run_id,
                                       status="ready",
@@ -423,6 +478,8 @@ class SandboxQueueConsumer:
                                       node_port=info["node_port"],
                                       graphql_port=info["graphql_port"],
                                       snapshot_volume=info.get("per_sandbox_volume"),
+                                      metadata=json.dumps(
+                                          {k: v for k, v in sandbox_meta.items() if v}),
                                       ready_at=datetime.now(tz=timezone.utc))
 
                 # Persist app_address back to orchestrator.runs so the dashboard can show it
@@ -469,8 +526,11 @@ class SandboxQueueConsumer:
             await pool.release(sandbox_id)
 
     async def _wait_for_tests(self, sandbox_id: str, run_id: str, timeout: int = 7200):
+        ai_session_run = await self._is_ai_session_run(run_id)
+        elapsed = 0
         for _ in range(timeout // 5):
             await asyncio.sleep(5)
+            elapsed += 5
 
             # ── Mid-run cancellation check ────────────────────────────────────
             # POST /runs/{id}/cancel only flips orchestrator.runs.status; without
@@ -481,6 +541,22 @@ class SandboxQueueConsumer:
                 log.info("Run %s cancelled mid-run — tearing down sandbox %s",
                          run_id, sandbox_id)
                 return
+
+            # ── AI-session runs: sandbox lifetime is the session's lifetime ───
+            # No bulk sweep is dispatched for these runs; the sandbox is torn
+            # down once every bound AI session has reached a terminal state
+            # (or none ever started within the grace window).
+            if ai_session_run:
+                exists, active = await self._ai_session_counts(run_id)
+                if exists and not active:
+                    log.info("All AI sessions for run %s finished — tearing down sandbox %s",
+                             run_id, sandbox_id)
+                    return
+                if not exists and elapsed > AI_SESSION_START_GRACE_S:
+                    log.warning("No AI session appeared for run %s within %ds — tearing down",
+                                run_id, AI_SESSION_START_GRACE_S)
+                    return
+                continue
 
             async with SessionLocal() as db:
                 meta_row = await db.execute(

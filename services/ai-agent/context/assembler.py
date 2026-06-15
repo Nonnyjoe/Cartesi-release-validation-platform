@@ -65,11 +65,17 @@ def _read_skill_summary(skill_name: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def assemble_project_knowledge() -> str:
+def assemble_project_knowledge(execution_mode: str = "runner") -> str:
     parts = [
         "<!-- PROJECT KNOWLEDGE — specific to this test-suite codebase and the sandbox environment -->",
     ]
     for name in PROJECT_FILES:
+        # Manual sessions receive their selected tests (with names, grouped by
+        # phase) in the work-plan message — the full ~250-test catalog would
+        # only burn prompt tokens there. Runner sessions keep it (trigger_test
+        # needs the whitelist inventory).
+        if name == "test-catalog.md" and execution_mode == "ai_manual":
+            continue
         parts.append(f"\n---\n\n<!-- file: {name} -->\n")
         parts.append(_read_project(name))
     return "\n".join(parts)
@@ -118,6 +124,8 @@ def build_system_prompt(
     goal: str | None = None,
     base_test_slug: str | None = None,
     sandbox_id: str | None = None,
+    execution_mode: str = "runner",
+    sandbox_manifest: str = "",
 ) -> str:
     """Assemble the full system prompt for a Claude AI session.
 
@@ -129,11 +137,15 @@ def build_system_prompt(
 
     Remaining headroom: ~170k tokens for conversation + tool calls.
     """
-    architecture       = _read("architecture.md")
-    graphql_schema     = _read("graphql_schema.graphql")
-    inspect_api        = _read("inspect_api.yaml")
-    component_map      = json.dumps(json.loads(_read("component_map.json")), indent=2)
-    project_knowledge  = assemble_project_knowledge()
+    # Legacy bundle removed from the system prompt — the same information lives in
+    # context/sources/project/*.md (architecture in sandbox-topology, JSON-RPC in
+    # cartesi-jsonrpc-quickref, etc.). The templates still accept the kwargs to keep
+    # the render signature stable.
+    architecture       = ""
+    graphql_schema     = ""
+    inspect_api        = ""
+    component_map      = ""
+    project_knowledge  = assemble_project_knowledge(execution_mode)
     skills_summary     = assemble_skills_summary()
     release_ctx        = format_release_context(
         release_tag, changelog, pr_summaries or [],
@@ -159,4 +171,6 @@ def build_system_prompt(
         goal=goal,
         base_test_slug=base_test_slug,
         sandbox_id=sandbox_id,
+        execution_mode=execution_mode,
+        sandbox_manifest=sandbox_manifest,
     )

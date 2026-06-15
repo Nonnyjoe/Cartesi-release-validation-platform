@@ -31,19 +31,48 @@ def _dsn() -> str:
 
 
 def _apply_overrides(definition_parsed: dict, overrides: dict) -> dict:
-    """Walk the assertion array; for each assertion, replace any leaf-name match."""
+    """Merge parameter_overrides into the assertion array.
+
+    Two forms (review §3.4 — the old bare-key form rewrote the key in EVERY
+    assertion, silently changing a shared `expect_count` or masking a failing
+    assertion):
+      - Path-scoped `assertions.<N>.<key>`  → rewrites exactly that assertion's leaf.
+      - Bare `<key>`                         → rewrites the FIRST assertion that has
+                                               that key; if >1 assertion has it the
+                                               override is AMBIGUOUS and rejected
+                                               (caller surfaces the error).
+    Returns the merged dict; raises ValueError on an ambiguous/unknown override.
+    """
     if not overrides:
         return definition_parsed
     out = copy.deepcopy(definition_parsed)
     assertions = out.get("assertions") or []
-    for assertion in assertions:
-        if not isinstance(assertion, dict):
+
+    for key, value in overrides.items():
+        # ── Path-scoped: assertions.<N>.<leaf> ──────────────────────────────
+        if key.startswith("assertions.") and key.count(".") >= 2:
+            _, idx_s, leaf = key.split(".", 2)
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                raise ValueError(f"override path {key!r}: index must be an integer")
+            if not (0 <= idx < len(assertions)) or not isinstance(assertions[idx], dict):
+                raise ValueError(f"override path {key!r}: no assertion at index {idx}")
+            assertions[idx][leaf] = value
             continue
-        for key, value in overrides.items():
-            # Path form `assertions.0.payload` is rare; we ignore it for now and only
-            # rewrite leaves whose key matches at the top of the assertion dict.
-            if key in assertion and key != "type":
-                assertion[key] = value
+
+        # ── Bare leaf: must be unambiguous (exactly one owning assertion) ───
+        owners = [a for a in assertions
+                  if isinstance(a, dict) and key in a and key != "type"]
+        if len(owners) == 0:
+            raise ValueError(
+                f"override {key!r} matches no assertion leaf; use a path form "
+                f"'assertions.<N>.{key}' or check the key name")
+        if len(owners) > 1:
+            raise ValueError(
+                f"override {key!r} is ambiguous: {len(owners)} assertions have it. "
+                f"Use a path form 'assertions.<N>.{key}' to target one.")
+        owners[0][key] = value
     return out
 
 
@@ -150,8 +179,11 @@ async def trigger_test(
     if sandbox is None:
         return {"success": False, "error": f"Sandbox {sandbox_id!r} not found"}
 
-    # 3) Apply overrides
-    parsed = _apply_overrides(info["definition_parsed"], overrides)
+    # 3) Apply overrides (path-scoped or unambiguous bare leaves only)
+    try:
+        parsed = _apply_overrides(info["definition_parsed"], overrides)
+    except ValueError as exc:
+        return {"success": False, "error": f"invalid parameter_overrides: {exc}"}
 
     # 4) Build the tests.commands message — mirror what sandbox_events consumer publishes.
     result_id = str(uuid.uuid4())

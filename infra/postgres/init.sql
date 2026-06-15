@@ -268,7 +268,12 @@ CREATE TABLE ai.sessions (
   tool_call_count  INTEGER DEFAULT 0,
   anthropic_key_ciphertext BYTEA,
   anthropic_key_nonce      BYTEA,
-  model_id                 TEXT DEFAULT 'claude-opus-4-6'
+  model_id                 TEXT DEFAULT 'claude-opus-4-6',
+  -- 'runner' = delegate execution to test-runner (trigger_test);
+  -- 'ai_manual' = the agent executes test steps itself and records verdicts.
+  execution_mode   TEXT NOT NULL DEFAULT 'runner'
+    CHECK (execution_mode IN ('runner', 'ai_manual')),
+  selected_tests   TEXT[] DEFAULT NULL
 );
 
 CREATE INDEX idx_ai_sessions_run_id ON ai.sessions (run_id);
@@ -282,11 +287,72 @@ CREATE TABLE ai.tool_invocations (
   output       JSONB,
   status       TEXT NOT NULL,
   duration_ms  INTEGER,
+  -- Test the agent was executing when this call ran (manual sessions; see
+  -- migration 0014). Feeds the auto-assembled verdict execution trail.
+  definition_slug TEXT,
+  -- Immutable verdict ↔ invocation link (migration 0015): set at verdict time,
+  -- replacing the mutable slug/time-window attribution. intent/observation are
+  -- the agent's optional per-step rationale + interpretation.
+  verdict_id   UUID,
+  intent       TEXT,
+  observation  TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_tool_inv_session ON ai.tool_invocations (session_id);
 CREATE INDEX idx_tool_inv_created ON ai.tool_invocations (created_at DESC);
+CREATE INDEX idx_tool_inv_session_slug ON ai.tool_invocations (session_id, definition_slug);
+CREATE INDEX idx_tool_inv_verdict ON ai.tool_invocations (verdict_id);
+
+-- The agent's own pass/fail judgments for manually executed tests (execution_mode
+-- = 'ai_manual'). Deliberately separate from runner-produced tests.results.
+CREATE TABLE ai.test_verdicts (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id       UUID NOT NULL REFERENCES ai.sessions (id) ON DELETE CASCADE,
+  sandbox_id       UUID,
+  definition_slug  TEXT NOT NULL,
+  verdict          TEXT NOT NULL
+    CHECK (verdict IN ('passed', 'failed', 'blocked', 'skipped', 'inconclusive')),
+  reasoning        TEXT NOT NULL,
+  inputs_used      JSONB,
+  evidence         JSONB,
+  duration_ms      INTEGER,
+  -- Trust hardening (migration 0015): validation + provenance + reproducibility.
+  confidence           NUMERIC(3,2) CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  evidence_validated   BOOLEAN NOT NULL DEFAULT false,
+  validation_notes     TEXT,
+  auto_downgraded_from  TEXT,
+  trail_step_count     INTEGER,
+  trail_mutating_count INTEGER,
+  trail_truncated      BOOLEAN NOT NULL DEFAULT false,
+  definition_snapshot  JSONB,
+  observations         JSONB,
+  model_id             TEXT,
+  model_params         JSONB,
+  release_tag          TEXT,
+  image_tag            TEXT,
+  contracts_version    TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_ai_verdicts_session ON ai.test_verdicts (session_id);
+CREATE INDEX idx_ai_verdicts_slug    ON ai.test_verdicts (definition_slug);
+-- One verdict per (session, test): record_test_verdict upserts on this.
+CREATE UNIQUE INDEX uq_verdict_session_slug ON ai.test_verdicts (session_id, definition_slug);
+
+-- Test understanding + plan, persisted before execution (migration 0015).
+CREATE TABLE ai.test_plans (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id       UUID NOT NULL REFERENCES ai.sessions (id) ON DELETE CASCADE,
+  definition_slug  TEXT NOT NULL,
+  objective        TEXT,
+  success_criteria TEXT,
+  failure_criteria TEXT,
+  planned_steps    JSONB,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (session_id, definition_slug)
+);
+CREATE INDEX idx_test_plans_session ON ai.test_plans (session_id);
 
 -- Must be LOGIN + password so the ai-agent's query_db tool can connect
 -- (matches AI_READER_DATABASE_URL in docker-compose.yml and migration 0012).
@@ -301,7 +367,7 @@ GRANT USAGE ON SCHEMA orchestrator TO ai_reader;
 GRANT USAGE ON SCHEMA ai TO ai_reader;
 GRANT SELECT ON tests.definitions, tests.results TO ai_reader;
 GRANT SELECT ON orchestrator.runs TO ai_reader;
-GRANT SELECT ON ai.sessions, ai.tool_invocations, ai.suggested_test_actions TO ai_reader;
+GRANT SELECT ON ai.sessions, ai.tool_invocations, ai.suggested_test_actions, ai.test_verdicts, ai.test_plans TO ai_reader;
 
 CREATE TABLE ai.analyses (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

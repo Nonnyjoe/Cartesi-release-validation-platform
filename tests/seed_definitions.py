@@ -76,19 +76,122 @@ def parse_md(path: Path) -> tuple[str, dict]:
     return raw, meta
 
 
+# Slug-prefix → (phase, category) used when CSV lookup and tag fallback both miss
+_SLUG_CATEGORY: list[tuple[str, str, str]] = [
+    # (prefix_or_exact, phase, category) — checked with startswith in order
+    ("cli-doctor-",           "Phase 1: Environment",             "CLI - doctor"),
+    ("cli-create-",           "Phase 1: Environment",             "CLI - create"),
+    ("cli-build-",            "Phase 1: Environment",             "CLI - build"),
+    ("cli-run-",              "Phase 1: Environment",             "CLI - run"),
+    ("cli-deploy-",           "Phase 1: Environment",             "CLI - deploy"),
+    ("cli-deposit-",          "Phase 1: Environment",             "CLI - deposit"),
+    ("cli-send-",             "Phase 1: Environment",             "CLI - send"),
+    ("cli-logs-",             "Phase 1: Environment",             "CLI - logs"),
+    ("cli-shell-",            "Phase 1: Environment",             "CLI - shell"),
+    ("cli-status-",           "Phase 1: Environment",             "CLI - status"),
+    ("cli-version-",          "Phase 1: Environment",             "CLI - version"),
+    ("cli-machine-hash-",     "Phase 1: Environment",             "CLI - hash"),
+    ("cli-hash-",             "Phase 1: Environment",             "CLI - hash"),
+    ("cli-help-",             "Phase 1: Environment",             "CLI - help"),
+    ("cli-clean-",            "Phase 1: Environment",             "CLI - clean"),
+    ("cli-address-book-",     "Phase 1: Environment",             "CLI - address-book"),
+    ("cli-cast-interop-",     "Phase 1: Environment",             "CLI - tooling"),
+    ("restart-",              "Phase 2: Clean Restarts",          "Services"),
+    ("erc1155-",              "Phase 3: Inputs (Local)",          "ERC1155"),
+    ("erc20-",                "Phase 3: Inputs (Local)",          "ERC20"),
+    ("erc721-",               "Phase 3: Inputs (Local)",          "ERC721"),
+    ("ether-",                "Phase 3: Inputs (Local)",          "ETH"),
+    ("advance-state-",        "Phase 3: Inputs (Local)",          "ETH"),
+    ("generic-",              "Phase 3: Inputs (Local)",          "Generic"),
+    ("cloud-erc1155-",        "Phase 4: Inputs (Remote)",         "ERC1155"),
+    ("cloud-erc20-",          "Phase 4: Inputs (Remote)",         "ERC20"),
+    ("cloud-erc721-",         "Phase 4: Inputs (Remote)",         "ERC721"),
+    ("cloud-eth-",            "Phase 4: Inputs (Remote)",         "ETH"),
+    ("cloud-ether-",          "Phase 4: Inputs (Remote)",         "ETH"),
+    ("cloud-generic-",        "Phase 4: Inputs (Remote)",         "Generic"),
+    ("cloud-massive-",        "Phase 4: Inputs (Remote)",         "Edge Cases"),
+    ("cloud-same-block-",     "Phase 4: Inputs (Remote)",         "Edge Cases"),
+    ("notice-",               "Phase 5: VM Outputs",              "Notices"),
+    ("oversized-notice-",     "Phase 5: VM Outputs",              "Notices"),
+    ("report-",               "Phase 5: VM Outputs",              "Reports"),
+    ("voucher-generation-",   "Phase 5: VM Outputs",              "Vouchers"),
+    ("delegatecall-",         "Phase 6: Voucher Execution",       "DELEGATECALL Vouchers"),
+    ("e2e-",                  "Phase 7: Token Portals",           "E2E Lifecycle"),
+    ("execute-voucher-",      "Phase 7: Token Portals",           "Vouchers"),
+    ("mint-nft-",             "Phase 7: Token Portals",           "Mint"),
+    ("overdraft-",            "Phase 7: Token Portals",           "Overdraft"),
+    ("prove-validate-",       "Phase 7: Token Portals",           "Notices"),
+    ("validate-notice-",      "Phase 7: Token Portals",           "Notices"),
+    ("voucher-execution-",    "Phase 7: Token Portals",           "Vouchers"),
+    ("voucher-",              "Phase 5: VM Outputs",              "Vouchers"),
+    ("jsonrpc-",              "Phase 8: Persistence & Recovery",  "Edge Cases"),
+    ("chaos-",                "Phase 9: Chaos & Fault Tolerance", "Chaos"),
+    ("cloud-recovery-",       "Phase 9: Chaos & Fault Tolerance", "Recovery"),
+    ("dirty-restart-",        "Phase 9: Chaos & Fault Tolerance", "Dirty Restarts"),
+    ("feature-",              "Phase 9: Chaos & Fault Tolerance", "Feature Flags"),
+    ("snapshot-",             "Phase 9: Chaos & Fault Tolerance", "Snapshots"),
+    ("ws-",                   "Phase 9: Chaos & Fault Tolerance", "Recovery"),
+    ("l1-reorg-",             "Phase 9: Chaos & Fault Tolerance", "Reorgs"),
+    ("consensus-",            "Phase 10: Multi-App & Consensus",  "Consensus"),
+    ("multi-app-",            "Phase 10: Multi-App & Consensus",  "Multi-App"),
+    ("determinism-",          "Phase 11: Security & Limits",      "Determinism"),
+    ("security-",             "Phase 11: Security & Limits",      "Security"),
+    ("internal-cli-app-",     "Phase 12: Internal CLI",           "Application Mgmt"),
+    ("internal-cli-db-",      "Phase 12: Internal CLI",           "Database"),
+    ("internal-cli-deploy-",  "Phase 12: Internal CLI",           "Deployment"),
+    ("internal-cli-read-",    "Phase 12: Internal CLI",           "Read"),
+    ("internal-cli-send-",    "Phase 12: Internal CLI",           "Inputs"),
+    ("internal-cli-",         "Phase 12: Internal CLI",           "Diagnostics"),
+    ("health-advancer-",      "Phase 13: Telemetry & Health",     "Advancer"),
+    ("health-claimer-",       "Phase 13: Telemetry & Health",     "Claimer"),
+    ("health-evm-reader-",    "Phase 13: Telemetry & Health",     "EVM Reader"),
+    ("health-jsonrpc-",       "Phase 13: Telemetry & Health",     "JSON-RPC API"),
+    ("health-validator-",     "Phase 13: Telemetry & Health",     "Validator"),
+    ("metrics-",              "Phase 13: Telemetry & Health",     "Metrics"),
+    ("config-advancer-",      "Phase 14: Configuration",          "Advancer"),
+    ("config-auth-",          "Phase 14: Configuration",          "Auth"),
+    ("config-epoch-",         "Phase 14: Configuration",          "Epoch"),
+    ("config-log-",           "Phase 14: Configuration",          "Logging"),
+    ("config-ws-",            "Phase 14: Configuration",          "EVM Reader"),
+    ("config-",               "Phase 14: Configuration",          "Startup"),
+    ("inspect-",              "Phase 15: Inspect Service",        "Basic"),
+    ("perf-",                 "Phase 17: Performance & Load",     "Latency"),
+    ("performance-",          "Phase 17: Performance & Load",     "Throughput"),
+]
+
+
 def _resolve_category(meta: dict, csv_lookup: dict) -> tuple[str | None, str | None]:
-    """Return (phase, category) for a definition, using CSV lookup then tag fallback."""
+    """Return (phase, category) for a definition, using CSV lookup → tag fallback → slug fallback."""
+    # 1. CSV lookup by csv_ids
     csv_ids = meta.get("csv_ids") or []
     if isinstance(csv_ids, str):
         csv_ids = [csv_ids]
     for cid in csv_ids:
         if cid in csv_lookup:
             return csv_lookup[cid]
-    # Fallback: derive phase from phaseN tags
+
+    # 2. Inline frontmatter fields
+    if meta.get("phase") and meta.get("category"):
+        return meta["phase"], meta["category"]
+
+    # 3. Phase tag fallback (sets phase only)
     tags = meta.get("tags") or []
     for tag in tags:
         if tag.lower() in _PHASE_TAG_NAMES:
-            return _PHASE_TAG_NAMES[tag.lower()], None
+            phase = _PHASE_TAG_NAMES[tag.lower()]
+            # Still try slug fallback for category within the resolved phase
+            slug = meta.get("id", "")
+            for prefix, _ph, cat in _SLUG_CATEGORY:
+                if slug.startswith(prefix):
+                    return phase, cat
+            return phase, None
+
+    # 4. Slug-prefix fallback
+    slug = meta.get("id", "")
+    for prefix, phase, cat in _SLUG_CATEGORY:
+        if slug.startswith(prefix):
+            return phase, cat
+
     return None, None
 
 
@@ -111,7 +214,13 @@ async def seed():
             release   = meta.get("release_introduced")
             min_node_major_version = int(meta.get("min_node_major_version", 1))
             phase, category = _resolve_category(meta, csv_lookup)
-            ai_allowed = bool(meta.get("ai_allowed", False))
+            # AI manual execution covers the same catalog as the Tests section,
+            # except the chaos phase (needs chaos-gated tools). YAML frontmatter
+            # `ai_allowed:` still overrides per test (explicit opt-in/out).
+            if "ai_allowed" in meta:
+                ai_allowed = bool(meta.get("ai_allowed"))
+            else:
+                ai_allowed = (phase or "") != "Phase 9: Chaos & Fault Tolerance"
 
             # Remove body from parsed JSON (it's a UI convenience field)
             parsed = {k: v for k, v in meta.items() if k != "body"}

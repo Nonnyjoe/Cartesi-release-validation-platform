@@ -289,6 +289,95 @@ gone within ~60s without manual `docker stop`. Requires rebuilding `ai-agent`,
 
 ---
 
+## 11. Iteration 4 — 2026-06-10 (manual test execution)
+
+New capability: **execution_mode='ai_manual'**. Instead of delegating selected tests to
+the test-runner via `trigger_test`, the agent executes each test itself: it reads the
+definition, decides the concrete inputs (payloads, amounts, CLI args), performs every
+step with primitive tools, judges observed vs expected behaviour assertion-by-assertion,
+and records its own verdict. The agent is made aware of the deployed application via a
+per-sandbox **Sandbox Deployment Manifest** (echo-dApp semantics + deployed addresses
+from `sandbox.sandboxes.metadata`) injected into the system prompt.
+
+### What changed
+
+| Area | Change |
+|---|---|
+| Schema | `infra/postgres/migrations/0013_ai_manual_execution.sql` (+ mirrored in `init.sql`): `ai.sessions.execution_mode` ('runner' \| 'ai_manual', default 'runner'), `ai.sessions.selected_tests TEXT[]`, new table `ai.test_verdicts` (verdict ∈ passed/failed/blocked/skipped/inconclusive, reasoning, inputs_used, evidence JSONB). `ai_reader` granted SELECT. |
+| New tool | `record_test_verdict` (`services/ai-agent/tools/verdicts.py`, schema in `tools/__init__.py`, dispatch in `tool_executor.py`). One call per manually executed test; writes `ai.test_verdicts`. Streamed live as `ai.verdict` (agent_loop special-case → session_manager event map). |
+| Session manager | Reads `execution_mode` + `selected_tests` from the request; `_load_sandbox_ports` now also loads `sandbox.sandboxes.metadata`; `_sandbox_manifest()` builds the deployment manifest; `_manual_plan_message()` builds the ordered work-plan initial message; limits scale for manual sessions (`min(200, 12·n+10)` tool calls, `min(3600, max(600, 180·n))` s) via new AgentLoop `max_tool_calls`/`max_duration` overrides. Sandbox ports/metadata are now loaded BEFORE prompt build in all four run_* methods. |
+| Prompt templates | `autonomous.py`: manual-execution protocol (understand → decide inputs → execute with primitives → judge → record verdict; `trigger_test` forbidden) when execution_mode='ai_manual'; manifest block rendered in autonomous/collaborative/interactive. `collaborative.py`: manual-mode rule swap. |
+| Orchestrator API | `POST /sessions` accepts `execution_mode` + `selected_tests`; ai_manual requires sandbox_id + ≥1 slug, validates slugs exist and are `ai_allowed` (422 otherwise); persists both columns; passes both through the `ai.requests` publish. New `GET /sessions/{id}/verdicts`. `_session_row` exposes both fields. For ai_manual the goal becomes optional (the work plan is the goal). |
+| Dashboard | New Session modal: execution-mode select + filterable multi-select test picker (ai_allowed definitions only). Sessions list shows a "manual (n tests)" tag. Session page: "manual execution" badge, live **Test verdicts** panel (verdict chips, reasoning, inputs_used/evidence expanders, pending-tests footer); refreshes on `ai.verdict` WS events + 4s poll. Types: `AIExecutionMode`, `AIVerdict`, `TestVerdict`. |
+
+### Design decisions (operator-confirmed)
+- Runner and manual modes **coexist**; chosen per session at creation.
+- Tests selected via dashboard picker **and** optional free-text goal for extra instructions.
+- AI verdicts stored in a **separate** `ai.test_verdicts` table, not `tests.results`.
+- App awareness via generated per-sandbox manifest + existing `test-app-behavior.md` knowledge.
+
+### Untested at time of writing
+Requires rebuild of `ai-agent`, `orchestrator`, `dashboard` and a DB migration
+(`0013_ai_manual_execution.sql`) on existing installs. Test guide:
+`docs/ai-manual-execution-testing.md`.
+
+---
+
+## 12. Iteration 5 — 2026-06-11 (bootstrap-first sessions, Anvil state cache, token diet)
+
+New session flow: **bootstrap-first**. `POST /sessions` with `bootstrap: true` (now the
+dashboard default) queues a dedicated provisioning run, streams provisioning progress +
+logs into the session's live event stream (`bootstrap_started` / `bootstrap_progress` /
+`bootstrap_log` / `bootstrap_ready`), and only starts the agent loop once the sandbox is
+`ready` with contracts, test tokens AND a registered application. The sandbox lives for
+the session's lifetime (torn down ~5s after the last bound session ends) instead of a
+test-backlog's lifetime.
+
+| Area | Change |
+|---|---|
+| Anvil state cache | After the first full provision per contracts_version, the chain state (contracts + tokens, WITH historical states: `cast rpc anvil_dumpState true`) is dumped to the shared volume `rvp-anvil-state-cache`; later provisions start Anvil with `--load-state` + `--preserve-historical-states` and skip cannon + OpenZeppelin/forge entirely. Provision time: **~3 min (miss) → ~45 s (hit)**. Cache key `<contracts_version>-r<REV>` (`provisioner.py`). |
+| Default app deploy | Every v2 sandbox now deploys + registers the default test snapshot as `test-app` at provision time (`DEPLOY_DEFAULT_APP=true`), and the full address set (app, InputBox, portals, tokens, cli container) is persisted to `sandbox.sandboxes.metadata` — the agent manifest now always carries real addresses (Iteration-4 report suggestion #1). |
+| Session lifetime | AI-bootstrap runs are tagged `metadata.ai_session=true`: the orchestrator dispatcher skips the bulk sweep for them, and `sandbox-manager._wait_for_tests` keeps the sandbox until all bound sessions leave `starting/active` (grace `AI_SESSION_START_GRACE_S=900` if no session ever starts). |
+| Token diet | (a) Tool results fed back to the model are bounded (`AI_TOOL_RESULT_MAX_CHARS`, default 6000 — head+tail with truncation marker; audit keeps full output). (b) Mode-filtered tool schemas: `trigger_test` omitted in ai_manual sessions; `provision_sandbox`/`teardown_sandbox` omitted whenever the platform manages the environment. (c) `read_logs` default tail 100→50. Observed: ~15-20k tokens per smoke session, turns 2+ at ~1 uncached input token (cache reads only). |
+| Bugs found & fixed | (1) `runs.metadata` JSON-null + `\|\|` array-concat corrupted 16 runs' metadata (`[null, {…}]`) — all three jsonb writers now CASE-sanitize to an object; rows repaired. (2) Anvil `--load-state` serves no historical state unless the dump embeds `historical_states` (RPC param, not the CLI flag) — without it the evm-reader loops on `BlockOutOfRangeError` and inputs are never indexed (the mechanism behind the Iteration-4 F-3 finding). Verified fixed: input submitted on a cache-hit sandbox is indexed end-to-end. |
+| Dashboard | New Session modal defaults to "Bootstrap new sandbox" (sandbox ID optional); Session page renders bootstrap progress/log/ready events and polls during `starting`; sessions list refreshes on bootstrap events. |
+
+Verification (6 live Sonnet sessions, all `completed`, sandboxes auto-torn-down):
+cache miss ~2m51s-3m27s bootstrap; cache hit **41-48 s**; cache-hit pipeline proof:
+`addInput` → `cartesi_listInputs` shows the input (machine-level REJECTED is the
+student-tracker dApp rejecting non-JSON payloads — see Iteration-4 F-2, still open).
+
+**The cache applies to ordinary runs too** (it lives in the shared `_provision_sync`
+path; the consumer resolves `contracts_version` per run from the release catalog and
+that version IS the cache key). Verified with a normal `POST /runs` for
+v2.0.0-alpha.11 → contracts v2.2.0: sandbox ready in **42 s**, run timeline shows
+`anvil_started|hit`, `contracts_cached|v2.2.0-r3`, `tokens_cached`, `app_deploy_done`;
+the 200-test sweep dispatched and executed normally (47 passed in the first 90 s; the
+only 2 failures were historically-flaky tests, not cache regressions). A release whose
+contracts version is not yet cached pays the full deploy once and warms the cache for
+every later run and AI session of that version.
+
+---
+
+## 13. Iteration 6 — 2026-06-11 (auto execution trails, token diet 2, student-tracker grounding)
+
+| Area | Change |
+|---|---|
+| Execution trails | Migration `0014`: `ai.tool_invocations.definition_slug`. Every tool call is attributed to the test being executed (time-window between verdicts, retro-tagged); `record_test_verdict` auto-assembles a digested per-step trail (tool, target surface, exact input → output, invocation_id deep-link) into `evidence.execution_trail`. Targets are categorised: `application (advance)`, `anvil (L1 tx)`, `node:jsonrpc-api`, `node:inspect`, `container:<name>`, `node:outputs`, `platform-db`. The agent is instructed NOT to paste tool output into evidence — judgment essentials only. Session page renders the trail as a numbered step list; audit rows carry a test chip. |
+| Token diet 2 | (a) Recursive hex shaping in model-bound tool results (head 96 + tail 24 + length for hex >200 chars; full value stays in audit). (b) Result bound 6000→5000 chars. (c) Manual sessions drop the 243-test catalog from the system prompt (tests arrive in the plan message): manual prompt 8.7k→7.1k tokens. (d) Minimal-narration instruction. |
+| Reliability | Mid-stream Anthropic drops (`httpx.RemoteProtocolError` "peer closed connection…") now retried like other transient errors (previously crashed the session — auto-blocked verdicts caught it, but the session failed). |
+| Budget | Manual formula 12n+10 (floor 50) → **15n+15 (floor 60)** — the full voucher journey (register → deposit → withdraw → claim wait → validate → execute) needs ~35 calls on its own. |
+| App grounding | `test-app-behavior.md` gained "proven command recipes" (the exact `cast`/portal/withdraw shapes the test-runner uses), so the agent stops burning calls on ABI guesswork. |
+
+Verification (session `bdcc4a8e`, 3 multi-tool tests, Sonnet): 3/3 verdicts with trails of
+**13 / 5 / 34 steps**; the agent ran the complete voucher L2→L1 journey and root-caused a
+**real dApp bug** (filed as a finding): the student-tracker emits ether-withdrawal vouchers
+calling `EtherPortal.withdrawEther(recipient, amount)` with `value=0x0` — the portal holds
+no balance, so on-chain execution reverts; node proof/claim/execute machinery verified
+correct. Fix belongs in `student-tracker/src/main.rs` (voucher destination/value encoding).
+
+---
+
 ## 7. End-to-end demo recipe
 
 Useful when verifying a clean run from scratch.

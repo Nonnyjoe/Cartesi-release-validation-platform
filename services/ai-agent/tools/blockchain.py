@@ -21,6 +21,20 @@ log = logging.getLogger("ai-agent.tools.blockchain")
 INPUTBOX_ADDRESS = "0x59b22D57D4f067708AB0c00552767405926dc768"
 DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
+# Cast subcommands that talk to a node and therefore accept --rpc-url. Pure-utility
+# subcommands like to-dec / keccak / abi-encode reject the flag (returncode 2), so
+# the wrapper must NOT add --rpc-url for those.
+_RPC_USING_SUBCMDS = frozenset({
+    # block / chain state
+    "block-number", "block", "basefee", "gas-price", "chain-id", "client",
+    "code", "balance", "nonce", "storage", "proof", "age",
+    # transactions
+    "tx", "receipt", "logs", "call", "send", "estimate", "publish", "run",
+    "access-list",
+    # raw rpc
+    "rpc",
+})
+
 
 async def send_advance_input(
     payload: str,
@@ -57,19 +71,27 @@ async def run_cast_command(
     """
     Execute a raw cast (Foundry) command via docker exec inside the sandbox's
     Anvil container. The command string is the part after 'cast',
-    e.g. 'block-number'. Automatically appends --rpc-url if not present.
+    e.g. 'block-number'.
 
-    Inside the Anvil container the chain listens on localhost:8545, so that is
-    the default RPC target (NOT the host-mapped port).
+    For RPC-using subcommands (block-number, call, send, balance, etc.) the tool
+    appends --rpc-url http://localhost:8545 automatically. For pure utility
+    subcommands (to-dec, keccak, abi-encode, etc.) no --rpc-url is added since
+    those subcommands reject the flag.
     """
     if not sandbox_id:
         return {"success": False,
                 "error": "No sandbox bound to this session — cast runs inside rvp-anvil-<id>."}
 
-    if "--rpc-url" not in command:
-        full_cmd = f"cast {command} --rpc-url http://localhost:8545"
-    else:
+    if "--rpc-url" in command:
         full_cmd = f"cast {command}"
+    else:
+        # First non-flag token is the cast subcommand. Only inject --rpc-url for
+        # node-querying subcommands; utility subcommands (to-dec, keccak, ...) reject it.
+        first = next((t for t in command.split() if not t.startswith("-")), "")
+        if first in _RPC_USING_SUBCMDS:
+            full_cmd = f"cast {command} --rpc-url http://localhost:8545"
+        else:
+            full_cmd = f"cast {command}"
 
     try:
         argv = shlex.split(full_cmd)

@@ -153,6 +153,9 @@ APP_BUILD_DIR      = os.environ.get("APP_BUILD_DIR", "/tmp/rvp-app-builds")
 APP_BUILD_TIMEOUT  = int(os.environ.get("APP_BUILD_TIMEOUT",  "600"))  # cartesi build seconds
 APP_CLONE_TIMEOUT  = int(os.environ.get("APP_CLONE_TIMEOUT",  "120"))  # git clone seconds
 APP_DEPLOY_TIMEOUT = int(os.environ.get("APP_DEPLOY_TIMEOUT", "120"))  # deploy exec seconds
+# git network operations (ls-remote, clone) retry with these backoffs — the
+# host DNS resolver intermittently SERVFAILs inside containers.
+GIT_RETRY_DELAYS_S = (0, 3, 8)
 
 # ── Build cache — snapshot volumes reused across runs ────────────────────────
 # Each successful build is saved as a named Docker volume keyed on
@@ -160,6 +163,32 @@ APP_DEPLOY_TIMEOUT = int(os.environ.get("APP_DEPLOY_TIMEOUT", "120"))  # deploy 
 # Volumes are labelled so old entries can be found and evicted.
 APP_CACHE_VOLUME_PREFIX = "rvp-cache"
 APP_CACHE_MAX_PER_APP   = int(os.environ.get("APP_CACHE_MAX_PER_APP", "3"))
+
+# ── Anvil state cache ─────────────────────────────────────────────────────────
+# After the first successful rollups-contracts + test-token deployment for a
+# given contracts_version, the full Anvil chain state is dumped
+# (anvil_dumpState) into a shared volume together with an address sidecar.
+# Subsequent provisions start Anvil with --load-state and skip BOTH deploy
+# steps entirely — no cannon run, no OpenZeppelin clone, no forge create.
+# The cache volume is mounted rw in sandbox-manager (ANVIL_STATE_CACHE_DIR)
+# and ro into each Anvil container (ANVIL_STATE_MOUNT).
+ANVIL_STATE_CACHE_DIR    = os.environ.get("ANVIL_STATE_CACHE_DIR", "/anvil-state-cache")
+ANVIL_STATE_CACHE_VOLUME = os.environ.get("ANVIL_STATE_CACHE_VOLUME", "rvp-anvil-state-cache")
+ANVIL_STATE_MOUNT        = "/anvil-state"
+# Bump to invalidate all cached states (e.g. when the token contracts change).
+# r3: dumps must be taken via `anvil_dumpState true` — the RPC param (not the
+#     CLI flag) is what embeds historical_states in the dump. Without them the
+#     loaded chain cannot serve state at/below the load-point block and the
+#     evm-reader loops on BlockOutOfRangeError (inputs never indexed).
+ANVIL_STATE_CACHE_REV    = "3"
+
+# ── Default application deploy ────────────────────────────────────────────────
+# When a run has no custom app, deploy the built-in test snapshot as "test-app"
+# so every sandbox exposes a registered application. The AI session flow (and
+# several jsonrpc tests) need a registered app; deploying at provision time
+# also keeps the registration block recent, avoiding evm-reader
+# BlockOutOfRangeError on historical start blocks.
+DEPLOY_DEFAULT_APP = os.environ.get("DEPLOY_DEFAULT_APP", "true").lower() in ("1", "true", "yes")
 
 
 class SandboxProvisioner:
@@ -344,10 +373,24 @@ class SandboxProvisioner:
             )
             _step("network_created", network=network_name)
 
-            # 2. Start Anvil
-            anvil = self._start_anvil(sandbox_id, network_name, anvil_port)
+            # 2. Start Anvil — with the cached chain state when available.
+            # A cache hit means contracts + test tokens are already in the
+            # loaded state, so steps 4 and 5 become no-ops (addresses come
+            # from the cache sidecar).
+            anvil_cache_key = self._anvil_cache_key(contracts_version)
+            anvil_cached = (
+                self._anvil_cache_lookup_sync(anvil_cache_key)
+                if node_major_version >= 2 else None
+            )
+            load_state_path = (
+                f"{ANVIL_STATE_MOUNT}/{anvil_cache_key}.state.json"
+                if anvil_cached else None
+            )
+            anvil = self._start_anvil(sandbox_id, network_name, anvil_port,
+                                      load_state_path=load_state_path)
             container_ids.append(anvil.id)
-            _step("anvil_started", port=anvil_port, container_id=anvil.id[:12])
+            _step("anvil_started", port=anvil_port, container_id=anvil.id[:12],
+                  state_cache="hit" if anvil_cached else "miss")
 
             # 3. Wait for Anvil to be ready before deploying or starting services
             log.info("Waiting for Anvil health in sandbox %s (timeout=%ds)…",
@@ -363,7 +406,13 @@ class SandboxProvisioner:
 
             # 4. Deploy rollups-contracts via cannon (when contracts_version is known)
             contract_addresses: Optional[dict] = None
-            if contracts_version:
+            if anvil_cached:
+                contract_addresses = anvil_cached.get("contract_addresses")
+                _step("contracts_cached", "ok",
+                      cache_key=anvil_cache_key,
+                      input_box=(contract_addresses or {}).get(
+                          "CARTESI_CONTRACTS_INPUT_BOX_ADDRESS", ""))
+            elif contracts_version:
                 _step("contracts_deploying", "info", contracts_version=contracts_version)
                 try:
                     contract_addresses = self._deploy_contracts_sync(
@@ -392,7 +441,13 @@ class SandboxProvisioner:
             # so deposit assertions can skip forge compile and just mint/approve/deposit.
             # Only needed for v2.x (portal deposit tests are v2-only).
             token_addrs: dict[str, str] = {}
-            if node_major_version >= 2:
+            if node_major_version >= 2 and anvil_cached:
+                token_addrs = anvil_cached["token_addrs"]
+                _step("tokens_cached", "ok",
+                      erc20=token_addrs.get("erc20", ""),
+                      erc721=token_addrs.get("erc721", ""),
+                      erc1155=token_addrs.get("erc1155", ""))
+            elif node_major_version >= 2:
                 _step("tokens_deploying", "info")
                 try:
                     token_addrs = self._deploy_test_tokens_sync(
@@ -409,6 +464,17 @@ class SandboxProvisioner:
                     )
                     _step("tokens_deploy_failed", "failed", reason=str(exc)[:200])
                     raise RuntimeError(f"Token deployment failed: {exc}") from exc
+
+                # Contracts + tokens deployed on a fresh chain — dump the state so
+                # the next provision for this contracts_version skips both steps.
+                try:
+                    self._anvil_cache_save_sync(
+                        anvil_cache_key, anvil.id, contract_addresses, token_addrs,
+                    )
+                    _step("anvil_state_cached", "ok", cache_key=anvil_cache_key)
+                except Exception as exc:
+                    log.warning("Anvil state cache save failed (non-fatal): %s", exc)
+                    _step("anvil_state_cache_failed", "info", reason=str(exc)[:200])
 
             # 6. Start node services
             if node_major_version >= 2 and sdk_version:
@@ -471,19 +537,24 @@ class SandboxProvisioner:
                         log.warning("Could not set up log stream for container %s: %s",
                                     cid[:12], exc)
 
-            # 7. Deploy application contract (v2.x only, when app was built)
-            if do_app and advancer_container_id:
-                _step("app_deploy_start", "info", app=app_name or "")
+            # 7. Deploy application contract (v2.x only). Custom apps use their
+            # built snapshot; runs without an app deploy the default test
+            # snapshot as "test-app" (DEPLOY_DEFAULT_APP) so every sandbox has
+            # a registered application from the start.
+            deploy_app = do_app or (DEPLOY_DEFAULT_APP and node_major_version >= 2)
+            deployed_app_name = app_name or ("app" if do_app else "test-app")
+            if deploy_app and advancer_container_id:
+                _step("app_deploy_start", "info", app=deployed_app_name)
                 try:
                     app_address = self._deploy_app_sync(
-                        sandbox_id, app_name or "app", advancer_container_id,
+                        sandbox_id, deployed_app_name, advancer_container_id,
                         step_cb=_step, log_buffer=log_buffer,
                         network_name=network_name,
                         contract_addresses=contract_addresses,
                         snapshot_volume=snapshot_volume,
                     )
                     _step("app_deploy_done", "ok",
-                          app=app_name or "", app_address=app_address)
+                          app=deployed_app_name, app_address=app_address)
 
                     # Wait for the evm-reader to pick up the ApplicationCreated
                     # event emitted by deployContracts.  The evm-reader watches
@@ -512,9 +583,9 @@ class SandboxProvisioner:
 
                 except Exception as exc:
                     log.error("App deploy failed for sandbox %s (%s): %s",
-                              sandbox_id, app_name, exc)
+                              sandbox_id, deployed_app_name, exc)
                     _step("app_deploy_failed", "failed",
-                          app=app_name or "", reason=str(exc)[:400])
+                          app=deployed_app_name, reason=str(exc)[:400])
                     raise RuntimeError(f"App deploy failed: {exc}") from exc
 
             # 8. Write compose YAML for inspection
@@ -560,6 +631,7 @@ class SandboxProvisioner:
             "graphql_port":         graphql_port,
             "cli_container_name":   cli_container_name,
             "app_address":          app_address,
+            "app_name":             deployed_app_name if app_address else None,
             "inputbox_address":     inputbox_address,
             "per_sandbox_volume":   per_sandbox_volume,
             # Pre-deployed test token addresses (v2.x only; empty strings if deployment failed)
@@ -571,7 +643,24 @@ class SandboxProvisioner:
 
     # ── Container launchers ────────────────────────────────────────────────────
 
-    def _start_anvil(self, sandbox_id: str, network: str, port: int) -> Container:
+    def _start_anvil(self, sandbox_id: str, network: str, port: int,
+                     load_state_path: Optional[str] = None) -> Container:
+        # --preserve-historical-states is required for the state cache: without
+        # it, an anvil started via --load-state serves NO historical state, and
+        # the evm-reader's transitionQuery(startBlock=<app registration block>)
+        # fails forever with BlockOutOfRangeError — inputs are never indexed.
+        # (Verified empirically: post-load eth_call at head-3 works with the
+        # flag, fails without.) Also kept on the dump side so cached states
+        # carry their history.
+        cmd = ("anvil --host 0.0.0.0 --port 8545 --block-time 1 --chain-id 31337 "
+               "--preserve-historical-states")
+        volumes = None
+        if load_state_path:
+            # State cache hit: mount the shared cache volume read-only and let
+            # Anvil initialise its genesis from the dumped state (contracts +
+            # test tokens already deployed — no cannon, no forge).
+            cmd += f" --load-state {load_state_path}"
+            volumes = {ANVIL_STATE_CACHE_VOLUME: {"bind": ANVIL_STATE_MOUNT, "mode": "ro"}}
         return self.client.containers.run(
             ANVIL_IMAGE,
             # Single-element list — the Foundry image ENTRYPOINT is ['/bin/sh', '-c'].
@@ -583,10 +672,11 @@ class SandboxProvisioner:
             # containers.  Wrapping the full command in a one-element list causes
             # Docker to receive Cmd=["anvil --host 0.0.0.0 ..."], so /bin/sh -c runs
             # the whole string as a proper shell script — all flags reach Anvil.
-            command=["anvil --host 0.0.0.0 --port 8545 --block-time 1 --chain-id 31337"],
+            command=[cmd],
             name=f"rvp-anvil-{sandbox_id[:8]}",
             network=network,
             ports={"8545/tcp": port},
+            volumes=volumes,
             # Use Google DNS so containers sharing this network namespace
             # (cannon-deployer, token-deployer) can resolve external hostnames like
             # codeload.github.com. The host DNS server can return SERVFAIL for this.
@@ -595,6 +685,67 @@ class SandboxProvisioner:
             remove=False,
             labels={"rvp.sandbox_id": sandbox_id, "rvp.component": "anvil"},
         )
+
+    # ── Anvil state cache helpers ──────────────────────────────────────────────
+
+    def _anvil_cache_key(self, contracts_version: Optional[str]) -> str:
+        raw = f"{contracts_version or 'devnet'}-r{ANVIL_STATE_CACHE_REV}"
+        return re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+
+    def _anvil_cache_lookup_sync(self, key: str) -> Optional[dict]:
+        """Return {'contract_addresses': dict|None, 'token_addrs': dict} when both
+        the state file and the address sidecar exist and parse, else None."""
+        import json as _json
+        state = os.path.join(ANVIL_STATE_CACHE_DIR, f"{key}.state.json")
+        addrs = os.path.join(ANVIL_STATE_CACHE_DIR, f"{key}.addresses.json")
+        if not (os.path.isfile(state) and os.path.isfile(addrs)):
+            return None
+        try:
+            with open(addrs) as f:
+                doc = _json.load(f)
+            if not isinstance(doc.get("token_addrs"), dict):
+                return None
+            return doc
+        except Exception as exc:
+            log.warning("Anvil state cache sidecar unreadable (%s): %s", addrs, exc)
+            return None
+
+    def _anvil_cache_save_sync(
+        self, key: str, anvil_cid: str,
+        contract_addresses: Optional[dict], token_addrs: dict,
+    ) -> None:
+        """Dump the chain state via anvil_dumpState and persist state + address
+        sidecar atomically. Raises on failure — callers treat it as non-fatal."""
+        import gzip
+        import json as _json
+        c = self.client.containers.get(anvil_cid)
+        # `true` = preserveHistoricalStates: embeds per-block historical states in
+        # the dump so a --load-state'd anvil can serve eth_call at/below the
+        # load-point block (the evm-reader queries the app registration block).
+        rc, out = c.exec_run(["cast", "rpc", "anvil_dumpState", "true"])
+        if rc != 0:
+            raise RuntimeError(f"anvil_dumpState failed: {out[-300:]!r}")
+        hexblob = out.decode("utf-8", errors="replace").strip().strip('"')
+        if not hexblob.startswith("0x"):
+            raise RuntimeError(f"unexpected anvil_dumpState output: {hexblob[:80]!r}")
+        blob = bytes.fromhex(hexblob[2:])
+        try:
+            state_json = gzip.decompress(blob)   # modern anvil gzips the dump
+        except Exception:
+            state_json = blob                    # older anvil: plain JSON bytes
+        os.makedirs(ANVIL_STATE_CACHE_DIR, exist_ok=True)
+        state = os.path.join(ANVIL_STATE_CACHE_DIR, f"{key}.state.json")
+        addrs = os.path.join(ANVIL_STATE_CACHE_DIR, f"{key}.addresses.json")
+        tmp = state + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(state_json)
+        os.replace(tmp, state)
+        tmp = addrs + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump({"contract_addresses": contract_addresses,
+                        "token_addrs": token_addrs}, f)
+        os.replace(tmp, addrs)
+        log.info("Anvil state cached: key=%s state_bytes=%d", key, len(state_json))
 
     def _start_v1_node(
         self, sandbox_id: str, network: str, image_tag: str,
@@ -863,8 +1014,25 @@ class SandboxProvisioner:
             _log("info", f"HEAD commit: {commit_sha[:12]}…  "
                          f"(app={app_name!r}, cli={cli_version})")
         except Exception as exc:
-            _log("warn", f"Could not resolve commit SHA ({exc}) — "
-                         "cache disabled, performing fresh build")
+            # GitHub unreachable (after retries). A fresh clone would fail in
+            # the same network conditions, so prefer the most recent cached
+            # build for this app+cli — stale but working beats a dead run.
+            fallback = self._find_latest_cache_volume_sync(app_github_url, cli_version)
+            if fallback:
+                fb_vol, fb_sha, fb_at = fallback
+                _log("warn",
+                     f"Could not resolve commit SHA ({exc}) — falling back to "
+                     f"the most recent cached build {fb_sha[:12]} (volume {fb_vol})")
+                if step_cb:
+                    step_cb("app_build_cache_fallback", "ok",
+                            app=app_name, cache_vol=fb_vol,
+                            commit_sha=fb_sha[:12],
+                            reason="GitHub unreachable — using last cached build")
+                self._create_volume_from_cache_sync(fb_vol, snap_vol, sandbox_id, _log)
+                _log("info", f"Snapshot restored to {snap_vol} from fallback cache")
+                return snap_vol
+            _log("warn", f"Could not resolve commit SHA ({exc}) and no cached "
+                         "build exists — attempting a fresh build anyway")
 
         # ── Compute cache key ───────────────────────────────────────────────
         cache_vol: Optional[str] = None
@@ -944,27 +1112,71 @@ class SandboxProvisioner:
         """
         Return the HEAD commit SHA for a Git repository using ``git ls-remote``.
         Does not clone — resolves the ref in a single network round-trip (~1s).
-        Raises RuntimeError if the command fails or output is unparseable.
+
+        Retries with backoff: the host DNS resolver intermittently SERVFAILs
+        inside containers ("Could not resolve host: github.com"), which is
+        transient — the same flakiness the Anvil helpers work around with
+        explicit DNS. Raises RuntimeError after all attempts fail.
         """
         import subprocess as _subprocess
-        result = _subprocess.run(
-            ["git", "ls-remote", "--quiet", app_github_url, "HEAD"],
-            capture_output=True, text=True,
-            timeout=APP_CLONE_TIMEOUT,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"git ls-remote failed (exit {result.returncode}): "
-                f"{result.stderr.strip()[:300]}"
+        last_err = ""
+        for attempt, delay in enumerate(GIT_RETRY_DELAYS_S):
+            if delay:
+                log.warning("git ls-remote retry in %ds (attempt %d): %s",
+                            delay, attempt + 1, last_err[:160])
+                time.sleep(delay)
+            result = _subprocess.run(
+                ["git", "ls-remote", "--quiet", app_github_url, "HEAD"],
+                capture_output=True, text=True,
+                timeout=APP_CLONE_TIMEOUT,
             )
-        # Output: "<sha>\tHEAD\n"
-        first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-        sha = first_line.split("\t")[0].strip()
-        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
-            return sha
-        raise RuntimeError(
-            f"Could not parse SHA from git ls-remote output: {first_line!r}"
-        )
+            if result.returncode != 0:
+                last_err = (f"git ls-remote failed (exit {result.returncode}): "
+                            f"{result.stderr.strip()[:300]}")
+                continue
+            # Output: "<sha>\tHEAD\n"
+            first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+            sha = first_line.split("\t")[0].strip()
+            if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+                return sha
+            last_err = f"Could not parse SHA from git ls-remote output: {first_line!r}"
+        raise RuntimeError(last_err)
+
+    def _find_latest_cache_volume_sync(
+        self, app_github_url: str, cli_version: str,
+    ) -> Optional[tuple[str, str, str]]:
+        """
+        Most recent build-cache volume for (app, cli_version), or None.
+        Returns (volume_name, commit_sha, built_at_epoch_str). Used as an
+        offline fallback when GitHub is unreachable and the HEAD SHA cannot
+        be resolved — a stale-but-working snapshot beats a guaranteed-to-fail
+        fresh clone.
+        """
+        import hashlib as _hashlib
+        app_url_hash = _hashlib.sha256(app_github_url.encode()).hexdigest()[:16]
+        try:
+            volumes = self.client.volumes.list(
+                filters={"label": [
+                    "rvp.cache=true",
+                    f"rvp.app_url_hash={app_url_hash}",
+                    f"rvp.cli_version={cli_version}",
+                ]},
+            )
+        except Exception as exc:
+            log.warning("Cache volume lookup failed: %s", exc)
+            return None
+        if not volumes:
+            return None
+        def _built_at(v) -> int:
+            try:
+                return int((v.attrs.get("Labels") or {}).get("rvp.built_at", "0"))
+            except (TypeError, ValueError):
+                return 0
+        latest = max(volumes, key=_built_at)
+        labels = latest.attrs.get("Labels") or {}
+        return (latest.name,
+                labels.get("rvp.commit_sha", "unknown"),
+                labels.get("rvp.built_at", "0"))
 
     def _create_volume_from_cache_sync(
         self,
@@ -1140,23 +1352,37 @@ class SandboxProvisioner:
             step_cb("app_clone", "info", url=app_github_url)
 
         _os.makedirs(APP_BUILD_DIR, exist_ok=True)
-        if _os.path.isdir(build_dir):
-            _shutil.rmtree(build_dir, ignore_errors=True)
 
-        clone_result = subprocess.run(
-            ["git", "clone", "--depth", "1", app_github_url, build_dir],
-            capture_output=True,
-            text=True,
-            timeout=APP_CLONE_TIMEOUT,
-        )
-        if log_buffer is not None:
-            for line in (clone_result.stdout + clone_result.stderr).splitlines():
-                line = line.strip()
-                if line:
-                    log_buffer.append("build", "info", f"[clone] {line}")
-        if clone_result.returncode != 0:
+        # Retry the clone: host DNS intermittently SERVFAILs inside containers
+        # ("Could not resolve host: github.com") — transient, rides out in seconds.
+        clone_result = None
+        for attempt, delay in enumerate(GIT_RETRY_DELAYS_S):
+            if delay:
+                log.warning("git clone retry in %ds (attempt %d) for %s",
+                            delay, attempt + 1, app_github_url)
+                if step_cb:
+                    step_cb("app_clone_retry", "info",
+                            attempt=attempt + 1, delay_s=delay)
+                time.sleep(delay)
+            if _os.path.isdir(build_dir):
+                _shutil.rmtree(build_dir, ignore_errors=True)
+            clone_result = subprocess.run(
+                ["git", "clone", "--depth", "1", app_github_url, build_dir],
+                capture_output=True,
+                text=True,
+                timeout=APP_CLONE_TIMEOUT,
+            )
+            if log_buffer is not None:
+                for line in (clone_result.stdout + clone_result.stderr).splitlines():
+                    line = line.strip()
+                    if line:
+                        log_buffer.append("build", "info", f"[clone] {line}")
+            if clone_result.returncode == 0:
+                break
+        if clone_result is None or clone_result.returncode != 0:
             raise RuntimeError(
-                f"git clone failed (exit {clone_result.returncode}): "
+                f"git clone failed after {len(GIT_RETRY_DELAYS_S)} attempts "
+                f"(exit {clone_result.returncode}): "
                 f"{clone_result.stderr[-600:]}"
             )
 

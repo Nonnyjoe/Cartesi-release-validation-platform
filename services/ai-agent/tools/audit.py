@@ -7,17 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from typing import Any
 
-import asyncpg
+from tools.db import get_pool
 
 log = logging.getLogger("ai-agent.audit")
-
-
-def _dsn() -> str:
-    return os.environ.get("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
 
 
 async def record_invocation(
@@ -27,45 +22,41 @@ async def record_invocation(
     output: Any,
     status: str,
     duration_ms: int,
+    definition_slug: str | None = None,
 ) -> None:
     if not session_id:
         return
-    dsn = _dsn()
-    if not dsn:
+    pool = await get_pool()
+    if pool is None:
         return
     try:
-        conn = await asyncpg.connect(dsn, timeout=5.0)
-    except Exception as exc:
-        log.warning("audit: connect failed: %s", exc)
-        return
-    try:
-        await conn.execute(
-            """
-            INSERT INTO ai.tool_invocations
-              (session_id, tool_name, input, output, status, duration_ms)
-            VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6)
-            """,
-            session_id,
-            tool_name,
-            json.dumps(tool_input)[:50_000],
-            json.dumps(output, default=str)[:200_000] if output is not None else None,
-            status,
-            duration_ms,
-        )
-        # Keep the live tool count on the session row in sync so the Sessions
-        # list shows real-time counts (previously only flushed at close).
-        await conn.execute(
-            """
-            UPDATE ai.sessions
-            SET tool_call_count = COALESCE(tool_call_count, 0) + 1
-            WHERE id = $1::uuid
-            """,
-            session_id,
-        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ai.tool_invocations
+                  (session_id, tool_name, input, output, status, duration_ms, definition_slug)
+                VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                """,
+                session_id,
+                tool_name,
+                json.dumps(tool_input)[:50_000],
+                json.dumps(output, default=str)[:200_000] if output is not None else None,
+                status,
+                duration_ms,
+                definition_slug,
+            )
+            # Keep the live tool count on the session row in sync so the Sessions
+            # list shows real-time counts (previously only flushed at close).
+            await conn.execute(
+                """
+                UPDATE ai.sessions
+                SET tool_call_count = COALESCE(tool_call_count, 0) + 1
+                WHERE id = $1::uuid
+                """,
+                session_id,
+            )
     except Exception as exc:
         log.warning("audit: insert failed: %s", exc)
-    finally:
-        await conn.close()
 
 
 class AuditedCall:

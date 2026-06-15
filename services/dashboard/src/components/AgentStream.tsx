@@ -11,6 +11,7 @@ export interface AgentEvent {
   result?: unknown
   severity?: string
   title?: string
+  source?: string   // bootstrap_log: which provisioning component emitted the line
 }
 
 interface Props {
@@ -79,6 +80,50 @@ function EventRow({ ev }: { ev: AgentEvent }) {
   if (ev.type === 'ai.completed') {
     return (
       <div className="text-xs text-rvp-success py-1">✓ Session completed</div>
+    )
+  }
+
+  if (ev.type === 'session_failed') {
+    return (
+      <div className="text-xs text-rvp-error py-1">
+        ✗ Session failed{ev.text ? ` — ${ev.text}` : ''}
+      </div>
+    )
+  }
+
+  if (ev.type === 'ai.limit_reached') {
+    return (
+      <div className="text-xs text-rvp-warning py-1">
+        ⏹ Limit reached{ev.text ? ` — ${ev.text}` : ''}
+      </div>
+    )
+  }
+
+  // Environment bootstrap (session created with bootstrap=true)
+  if (ev.type === 'bootstrap_started' || ev.type === 'bootstrap_progress') {
+    return (
+      <div className="flex gap-2 items-start text-xs">
+        <span className="shrink-0 text-gray-600 mt-0.5">{new Date(ev.ts).toLocaleTimeString()}</span>
+        <div className="text-rvp-info">
+          <span className="animate-pulse">◌</span> {ev.text || 'Provisioning environment…'}
+        </div>
+      </div>
+    )
+  }
+
+  if (ev.type === 'bootstrap_log') {
+    return (
+      <div className="text-[11px] font-mono ml-6 text-gray-600 border-l-2 border-rvp-border/50 pl-3 py-0.5">
+        {ev.source ? <span className="text-gray-500">[{ev.source}] </span> : null}{ev.text}
+      </div>
+    )
+  }
+
+  if (ev.type === 'bootstrap_ready') {
+    return (
+      <div className="text-xs text-rvp-success py-1">
+        ✓ {ev.text || 'Environment ready — agent starting.'}
+      </div>
     )
   }
 

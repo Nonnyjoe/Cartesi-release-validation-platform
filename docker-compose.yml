@@ -19,6 +19,12 @@ volumes:
   # Machine snapshot for v2.x sandbox testing.
   # Populate with: make build-test-app
   rvp-test-snapshot:
+  # Cached Anvil chain state (rollups contracts + test tokens pre-deployed).
+  # Written by sandbox-manager after the first full provision per
+  # contracts_version; mounted ro into each sandbox Anvil container.
+  # Fixed name: the provisioner mounts it into anvil containers by literal name.
+  rvp-anvil-state-cache:
+    name: rvp-anvil-state-cache
 
 services:
 
@@ -147,6 +153,8 @@ services:
       # Host-bind for app builds: cartesi build spawns sub-containers that
       # mount paths under here, so the path must exist on the macOS host.
       - /tmp/rvp-app-builds:/tmp/rvp-app-builds
+      # Anvil state cache: rw here, mounted ro into sandbox Anvil containers.
+      - rvp-anvil-state-cache:/anvil-state-cache
     networks:
       - rvp-internal
     depends_on:

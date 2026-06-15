@@ -23,6 +23,7 @@ from tools.jsonrpc import call_jsonrpc
 from tools.sandbox import provision_sandbox, teardown_sandbox
 from tools.skill_lookup import lookup_skill
 from tools.test_trigger import read_test_definition, trigger_test
+from tools.verdicts import record_test_verdict, record_test_plan
 
 log = logging.getLogger("ai-agent.tool_executor")
 
@@ -37,7 +38,8 @@ class ToolExecutor:
     """
 
     def __init__(self, sandbox_id: str, anvil_port: int, node_port: int, graphql_port: int,
-                 session_id: str | None = None, docker_network: str | None = None):
+                 session_id: str | None = None, docker_network: str | None = None,
+                 provenance: dict | None = None):
         self.sandbox_id     = sandbox_id
         self.session_id     = session_id
         self.anvil_port     = anvil_port
@@ -47,6 +49,14 @@ class ToolExecutor:
         self.anvil_rpc_url  = f"http://{SANDBOX_HOST}:{anvil_port}"
         self.node_http_url  = f"http://{SANDBOX_HOST}:{node_port}"
         self.graphql_url    = f"http://{SANDBOX_HOST}:{graphql_port}/graphql"
+        # Reproducibility provenance stamped onto every verdict (model id+params,
+        # release/image/contracts). Set by SessionManager — never by the model.
+        self.provenance     = provenance or {}
+        # Manual-execution test context: set when the agent reads a definition,
+        # stamped onto every subsequent audit row until the verdict is recorded.
+        # record_test_verdict uses these tagged rows to auto-assemble the
+        # execution trail in the verdict's evidence.
+        self.current_test_slug: str | None = None
 
     def _chaos_ctx(self) -> dict:
         """Container names (Docker SDK accepts names where IDs are expected) +
@@ -66,6 +76,20 @@ class ToolExecutor:
         Returns a JSON-serialisable result dict. Never raises.
         """
         log.info("Tool call: %s  input=%s", tool_name, str(tool_input)[:200])
+
+        # Live hint for the audit panel: which test the agent is working on.
+        # NOTE: authoritative trail attribution is by the immutable verdict_id
+        # claimed at record_test_verdict time (see tools/verdicts._claim_trail);
+        # this slug tag is only a real-time convenience and is overwritten to the
+        # correct test when the verdict claims the row.
+        if tool_name in ("read_test_definition", "record_test_plan"):
+            s = tool_input.get("definition_slug") or tool_input.get("slug")
+            if s:
+                self.current_test_slug = s
+        slug_for_row = (tool_input.get("definition_slug")
+                        if tool_name in ("record_test_verdict", "record_test_plan")
+                        else self.current_test_slug)
+
         call = AuditedCall(self.session_id, tool_name, tool_input)
         with call:
             try:
@@ -85,9 +109,16 @@ class ToolExecutor:
             await record_invocation(
                 self.session_id, call.tool_name, call.tool_input,
                 call.output, call.status, call.elapsed_ms,
+                definition_slug=slug_for_row,
             )
         except Exception as exc:  # never bubble up
             log.debug("audit write failed: %s", exc)
+
+        # A recorded verdict closes the current test's context.
+        if (tool_name == "record_test_verdict"
+                and isinstance(result, dict) and result.get("success")
+                and tool_input.get("definition_slug") == self.current_test_slug):
+            self.current_test_slug = None
         return result
 
     async def _dispatch(self, tool_name: str, inp: dict) -> Any:
@@ -174,6 +205,36 @@ class ToolExecutor:
 
         elif tool_name == "read_test_definition":
             return await read_test_definition(slug=inp["definition_slug"])
+
+        elif tool_name == "record_test_verdict":
+            return await record_test_verdict(
+                session_id=self.session_id or "",
+                sandbox_id=self.sandbox_id,
+                definition_slug=inp["definition_slug"],
+                verdict=inp["verdict"],
+                reasoning=inp["reasoning"],
+                inputs_used=inp.get("inputs_used"),
+                evidence=inp.get("evidence"),
+                duration_ms=inp.get("duration_ms"),
+                confidence=inp.get("confidence"),
+                observations=inp.get("observations"),
+                # Provenance injected by the platform, not the model.
+                model_id=self.provenance.get("model_id"),
+                model_params=self.provenance.get("model_params"),
+                release_tag=self.provenance.get("release_tag"),
+                image_tag=self.provenance.get("image_tag"),
+                contracts_version=self.provenance.get("contracts_version"),
+            )
+
+        elif tool_name == "record_test_plan":
+            return await record_test_plan(
+                session_id=self.session_id or "",
+                definition_slug=inp["definition_slug"],
+                objective=inp["objective"],
+                success_criteria=inp.get("success_criteria"),
+                failure_criteria=inp.get("failure_criteria"),
+                planned_steps=inp.get("planned_steps"),
+            )
 
         elif tool_name == "run_cli_command":
             return await run_cli_command(

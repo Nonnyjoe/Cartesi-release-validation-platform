@@ -152,12 +152,30 @@ class TestCommandConsumer:
             elif parameter_overrides:
                 from copy import deepcopy
                 dp = deepcopy(definition.get("definition_parsed") or {})
-                for assertion in dp.get("assertions", []) or []:
-                    if not isinstance(assertion, dict):
+                asserts = dp.get("assertions", []) or []
+                # Path-scoped (assertions.<N>.<leaf>) or UNAMBIGUOUS bare leaves
+                # only. A bare key owned by >1 assertion is skipped + logged,
+                # never blindly rewritten in every assertion (review §3.4).
+                for k, v in parameter_overrides.items():
+                    if k.startswith("assertions.") and k.count(".") >= 2:
+                        _, idx_s, leaf = k.split(".", 2)
+                        try:
+                            idx = int(idx_s)
+                        except ValueError:
+                            log.warning("override %s: bad index — skipped", k); continue
+                        if 0 <= idx < len(asserts) and isinstance(asserts[idx], dict):
+                            asserts[idx][leaf] = v
+                        else:
+                            log.warning("override %s: no assertion at index — skipped", k)
                         continue
-                    for k, v in parameter_overrides.items():
-                        if k in assertion and k != "type":
-                            assertion[k] = v
+                    owners = [a for a in asserts
+                              if isinstance(a, dict) and k in a and k != "type"]
+                    if len(owners) == 1:
+                        owners[0][k] = v
+                    else:
+                        log.warning(
+                            "override %s skipped: matches %d assertions (ambiguous) — "
+                            "use assertions.<N>.%s", k, len(owners), k)
                 definition["definition_parsed"] = dp
             log.info(
                 "AI override applied: slug=%s session=%s keys=%s",

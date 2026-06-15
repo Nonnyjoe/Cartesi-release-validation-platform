@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { sessionsApi } from '../api'
+import { sessionsApi, testsApi } from '../api'
 import { StatusBadge } from '../components/StatusBadge'
 import { useWebSocket } from '../hooks/useWebSocket'
-import type { AISession, AIMode } from '../types'
+import type { AISession, AIMode, TestDefinition } from '../types'
 import { format } from 'date-fns'
 
 // Event types that should trigger a Sessions list refresh
@@ -11,9 +11,12 @@ const AI_LIST_EVENTS = new Set([
   'ai.session_created',
   'session_started',
   'session_completed',
+  'session_failed',
   'ai.tool_call',
   'ai.tool_result',
   'ai.finding',
+  'bootstrap_started',
+  'bootstrap_ready',
 ])
 
 const MODES: AIMode[] = ['autonomous', 'collaborative', 'interactive']
@@ -24,17 +27,151 @@ const MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (fast)' },
 ] as const
 
+// Mirrors the orchestrator's AI_MANUAL_MAX_PHASES default — server enforces too.
+const MAX_PHASES_PER_SESSION = 2
+
+function PhasePicker({ selectedPhases, onPhasesChange, excluded, onExcludedChange }: {
+  selectedPhases: string[]
+  onPhasesChange: (phases: string[]) => void
+  excluded: string[]                       // per-test trim: slugs unticked within selected phases
+  onExcludedChange: (slugs: string[]) => void
+}) {
+  const [defs, setDefs] = useState<TestDefinition[]>([])
+  const [openPhase, setOpenPhase] = useState<string | null>(null)
+
+  useEffect(() => {
+    testsApi.list({ ai_allowed: true }).then(setDefs).catch(() => setDefs([]))
+  }, [])
+
+  // Same grouping as the Tests page: phase → tests (ai-runnable only).
+  const phases = useMemo(() => {
+    const m = new Map<string, TestDefinition[]>()
+    for (const d of defs) {
+      const p = d.phase || 'Unphased'
+      if (!m.has(p)) m.set(p, [])
+      m.get(p)!.push(d)
+    }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+  }, [defs])
+
+  const togglePhase = (phase: string) => {
+    if (selectedPhases.includes(phase)) {
+      onPhasesChange(selectedPhases.filter(p => p !== phase))
+      const phaseSlugs = new Set((phases.find(([p]) => p === phase)?.[1] ?? []).map(d => d.slug))
+      onExcludedChange(excluded.filter(s => !phaseSlugs.has(s)))
+      if (openPhase === phase) setOpenPhase(null)
+    } else if (selectedPhases.length < MAX_PHASES_PER_SESSION) {
+      onPhasesChange([...selectedPhases, phase])
+    }
+  }
+
+  const toggleTest = (slug: string) =>
+    onExcludedChange(excluded.includes(slug) ? excluded.filter(s => s !== slug) : [...excluded, slug])
+
+  const selectedCount = useMemo(() => {
+    let n = 0
+    for (const [p, tests] of phases) {
+      if (selectedPhases.includes(p)) n += tests.filter(t => !excluded.includes(t.slug)).length
+    }
+    return n
+  }, [phases, selectedPhases, excluded])
+
+  return (
+    <div>
+      <label className="text-xs text-gray-400 block mb-1">
+        Test phases <span className="text-gray-500">
+          ({selectedPhases.length}/{MAX_PHASES_PER_SESSION} phases · {selectedCount} tests selected)
+        </span>
+      </label>
+      <div className="border border-rvp-border rounded max-h-56 overflow-y-auto divide-y divide-rvp-border/50">
+        {phases.map(([phase, tests]) => {
+          const isSelected = selectedPhases.includes(phase)
+          const isOpen = openPhase === phase
+          const atLimit = !isSelected && selectedPhases.length >= MAX_PHASES_PER_SESSION
+          const kept = tests.filter(t => !excluded.includes(t.slug)).length
+          return (
+            <div key={phase}>
+              <div className={`flex items-center gap-2 px-2 py-1.5 ${atLimit ? 'opacity-40' : 'hover:bg-white/5'}`}>
+                <input type="checkbox" checked={isSelected} disabled={atLimit}
+                  onChange={() => togglePhase(phase)} />
+                <button type="button" className="flex-1 text-left min-w-0"
+                  onClick={() => setOpenPhase(isOpen ? null : phase)}>
+                  <span className="text-xs text-gray-200">{phase}</span>
+                  <span className="text-[10px] text-gray-500 ml-2">
+                    {isSelected ? `${kept}/${tests.length}` : tests.length} tests
+                  </span>
+                </button>
+                <button type="button" className="text-gray-500 text-xs px-1"
+                  onClick={() => setOpenPhase(isOpen ? null : phase)}>
+                  {isOpen ? '▾' : '▸'}
+                </button>
+              </div>
+              {isOpen && (
+                <div className="bg-rvp-bg/50 max-h-36 overflow-y-auto divide-y divide-rvp-border/30">
+                  {tests.map(d => (
+                    <label key={d.slug}
+                      className={`flex items-start gap-2 pl-7 pr-2 py-1 cursor-pointer hover:bg-white/5 ${!isSelected ? 'opacity-50' : ''}`}>
+                      <input type="checkbox" className="mt-0.5" disabled={!isSelected}
+                        checked={isSelected && !excluded.includes(d.slug)}
+                        onChange={() => toggleTest(d.slug)} />
+                      <span className="min-w-0">
+                        <span className="block text-[11px] font-mono text-gray-300 truncate">{d.slug}</span>
+                        <span className="block text-[10px] text-gray-500 truncate">{d.name}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {phases.length === 0 && (
+          <div className="px-2 py-3 text-center text-xs text-gray-500">No runnable test definitions found</div>
+        )}
+      </div>
+      <div className="text-[10px] text-gray-500 mt-1">
+        Same phases as the Tests section (chaos phase excluded). Pick up to {MAX_PHASES_PER_SESSION} phases;
+        expand a phase to trim individual tests. The agent chooses the execution order and its own inputs.
+      </div>
+    </div>
+  )
+}
+
 function NewSessionModal({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({
     mode: 'autonomous',
     run_id: '',
     sandbox_id: '',
     goal: '',
+    execution_mode: 'runner',
     anthropic_api_key: '',
     model_id: 'claude-opus-4-6',
   })
+  // 'bootstrap' = the platform provisions a dedicated sandbox first (contracts,
+  // tokens and app pre-deployed); the agent starts only when it is ready.
+  const [envMode, setEnvMode] = useState<'bootstrap' | 'existing'>('bootstrap')
+  const [selectedPhases, setSelectedPhases] = useState<string[]>([])
+  const [excludedTests, setExcludedTests] = useState<string[]>([])
+  const [allDefs, setAllDefs] = useState<TestDefinition[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (form.execution_mode === 'ai_manual') {
+      testsApi.list({ ai_allowed: true }).then(setAllDefs).catch(() => setAllDefs([]))
+    }
+  }, [form.execution_mode])
+
+  // Final slug list = every runnable test in the selected phases minus trims,
+  // ordered by phase then slug (the agent re-orders within its plan).
+  const finalSlugs = useMemo(() => {
+    if (selectedPhases.length === 0) return []
+    return allDefs
+      .filter(d => selectedPhases.includes(d.phase || 'Unphased') && !excludedTests.includes(d.slug))
+      .sort((a, b) => (a.phase || '').localeCompare(b.phase || '', undefined, { numeric: true })
+                      || a.slug.localeCompare(b.slug))
+      .map(d => d.slug)
+  }, [allDefs, selectedPhases, excludedTests])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -42,13 +179,25 @@ function NewSessionModal({ onClose }: { onClose: () => void }) {
       setError('Anthropic API key is required (sk-ant-…).')
       return
     }
+    if (envMode === 'existing' && !form.sandbox_id) {
+      setError('Enter a sandbox ID, or switch to "Bootstrap new sandbox".')
+      return
+    }
+    if (form.execution_mode === 'ai_manual' && finalSlugs.length === 0) {
+      setError('Select at least one phase (with at least one test kept) for manual execution.')
+      return
+    }
     setLoading(true)
     try {
       await sessionsApi.create({
         mode: form.mode,
-        run_id: form.run_id || undefined,
-        sandbox_id: form.sandbox_id || undefined,
+        run_id: envMode === 'existing' ? (form.run_id || undefined) : undefined,
+        sandbox_id: envMode === 'existing' ? (form.sandbox_id || undefined) : undefined,
+        bootstrap: envMode === 'bootstrap' || undefined,
         goal: form.goal || undefined,
+        execution_mode: form.execution_mode,
+        selected_phases: form.execution_mode === 'ai_manual' ? selectedPhases : undefined,
+        selected_tests: form.execution_mode === 'ai_manual' ? finalSlugs : undefined,
         anthropic_api_key: form.anthropic_api_key,
         model_id: form.model_id,
       })
@@ -58,7 +207,7 @@ function NewSessionModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="card w-full max-w-md p-6 space-y-4">
+      <div className="card w-full max-w-md p-6 space-y-4 max-h-[90vh] overflow-y-auto">
         <h2 className="text-lg font-semibold text-gray-100">New AI Session</h2>
         <form onSubmit={submit} className="space-y-3">
           <div>
@@ -68,6 +217,25 @@ function NewSessionModal({ onClose }: { onClose: () => void }) {
               {MODES.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
           </div>
+          <div>
+            <label className="text-xs text-gray-400 block mb-1">Test execution</label>
+            <select className="input w-full" value={form.execution_mode}
+              onChange={e => setForm(f => ({ ...f, execution_mode: e.target.value }))}>
+              <option value="runner">Runner — agent delegates to the test-runner (trigger_test)</option>
+              <option value="ai_manual">Manual — agent executes each test itself, step by step</option>
+            </select>
+            {form.execution_mode === 'ai_manual' && (
+              <div className="text-[10px] text-gray-500 mt-1">
+                The agent reads each definition, decides the inputs, runs every step with
+                primitive tools and records its own verdicts.
+              </div>
+            )}
+          </div>
+          {form.execution_mode === 'ai_manual' && (
+            <PhasePicker
+              selectedPhases={selectedPhases} onPhasesChange={setSelectedPhases}
+              excluded={excludedTests} onExcludedChange={setExcludedTests} />
+          )}
           <div>
             <label className="text-xs text-gray-400 block mb-1">Anthropic API Key</label>
             <input className="input w-full font-mono text-xs" placeholder="sk-ant-…" type="password"
@@ -85,15 +253,33 @@ function NewSessionModal({ onClose }: { onClose: () => void }) {
             </select>
           </div>
           <div>
-            <label className="text-xs text-gray-400 block mb-1">Run ID (optional)</label>
-            <input className="input w-full" placeholder="uuid" value={form.run_id}
-              onChange={e => setForm(f => ({ ...f, run_id: e.target.value }))} />
+            <label className="text-xs text-gray-400 block mb-1">Environment</label>
+            <select className="input w-full" value={envMode}
+              onChange={e => setEnvMode(e.target.value as 'bootstrap' | 'existing')}>
+              <option value="bootstrap">Bootstrap new sandbox — provision first, then start the agent</option>
+              <option value="existing">Use an existing sandbox (enter ID below)</option>
+            </select>
+            {envMode === 'bootstrap' && (
+              <div className="text-[10px] text-gray-500 mt-1">
+                Contracts, test tokens and the application are deployed before the agent
+                starts (fast when the Anvil state cache is warm). Progress streams live below.
+              </div>
+            )}
           </div>
-          <div>
-            <label className="text-xs text-gray-400 block mb-1">Sandbox ID (optional)</label>
-            <input className="input w-full" placeholder="uuid" value={form.sandbox_id}
-              onChange={e => setForm(f => ({ ...f, sandbox_id: e.target.value }))} />
-          </div>
+          {envMode === 'existing' && (
+            <>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Run ID (optional)</label>
+                <input className="input w-full" placeholder="uuid" value={form.run_id}
+                  onChange={e => setForm(f => ({ ...f, run_id: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Sandbox ID</label>
+                <input className="input w-full" placeholder="uuid" value={form.sandbox_id}
+                  onChange={e => setForm(f => ({ ...f, sandbox_id: e.target.value }))} />
+              </div>
+            </>
+          )}
           <div>
             <label className="text-xs text-gray-400 block mb-1">Goal / Instructions</label>
             <textarea className="input w-full h-20 resize-none" placeholder="Investigate voucher execution…"
@@ -168,7 +354,12 @@ export default function Sessions() {
                   </Link>
                   {s.goal && <div className="text-xs text-gray-500 truncate max-w-xs">{s.goal}</div>}
                 </td>
-                <td className="px-4 py-3"><StatusBadge status={s.mode} /></td>
+                <td className="px-4 py-3">
+                  <StatusBadge status={s.mode} />
+                  {s.execution_mode === 'ai_manual' && (
+                    <div className="text-[10px] text-rvp-info mt-0.5">manual ({s.selected_tests.length} tests)</div>
+                  )}
+                </td>
                 <td className="px-4 py-3"><StatusBadge status={s.status} /></td>
                 <td className="px-4 py-3 text-xs text-gray-400">{s.tool_calls_used}</td>
                 <td className="px-4 py-3 text-xs text-gray-400">

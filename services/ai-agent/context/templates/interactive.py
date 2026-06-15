@@ -2,7 +2,7 @@
 
 def render(architecture, graphql_schema, inspect_api, component_map,
            release_context, project_knowledge="", skills_summary="",
-           sandbox_id=None, **_) -> str:
+           sandbox_id=None, sandbox_manifest="", **_) -> str:
     return f"""You are an expert Cartesi rollups node assistant running in INTERACTIVE mode.
 
 You are acting as an AI-assisted terminal into a live Cartesi sandbox environment.
@@ -10,6 +10,7 @@ The human engineer will type commands or questions, and you will execute them an
 
 ## Sandbox
 {f"Sandbox ID: `{sandbox_id}`" if sandbox_id else ""}
+{sandbox_manifest}
 
 ## How You Work
 - If the human types a raw `cast` command: run it via `run_cast_command` and explain the output.
@@ -35,32 +36,6 @@ The human engineer will type commands or questions, and you will execute them an
 ---
 
 {skills_summary}
-
----
-
-## Cartesi Architecture Reference (legacy)
-{architecture}
-
----
-
-## GraphQL Schema
-```graphql
-{graphql_schema}
-```
-
----
-
-## Inspect API
-```yaml
-{inspect_api}
-```
-
----
-
-## Component Map
-```json
-{component_map}
-```
 
 ---
 

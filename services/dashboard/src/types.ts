@@ -2,8 +2,13 @@
 export type RunStatus = 'queued' | 'provisioning' | 'running' | 'completed' | 'warning' | 'failed' | 'cancelled'
 export type TestStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'skipped'
 export type SandboxStatus = 'provisioning' | 'ready' | 'failed' | 'closed'
-export type AISessionStatus = 'active' | 'completed' | 'failed' | 'cancelled'
+// 'starting' = environment bootstrap in progress; matches the ai_session_status
+// Postgres enum (paused/aborted included).
+export type AISessionStatus =
+  'starting' | 'active' | 'paused' | 'completed' | 'failed' | 'aborted' | 'cancelled'
 export type AIMode = 'autonomous' | 'collaborative' | 'interactive'
+export type AIExecutionMode = 'runner' | 'ai_manual'
+export type AIVerdict = 'passed' | 'failed' | 'blocked' | 'skipped' | 'inconclusive'
 
 // ─── Core domain types ────────────────────────────────────────────────────────
 
@@ -130,6 +135,8 @@ export interface AISession {
   mode:            AIMode
   status:          AISessionStatus
   goal?:           string
+  execution_mode:  AIExecutionMode
+  selected_tests:  string[]
   model:           string
   tool_calls_used: number
   input_tokens:    number
@@ -149,13 +156,65 @@ export interface Finding {
 
 /** Matches ai.tool_invocations row */
 export interface ToolInvocation {
-  id:           string
-  tool_name:    string
-  input:        Record<string, unknown>
-  output:       unknown
-  status:       'ok' | 'error' | 'denied'
-  duration_ms:  number
-  created_at:   string
+  id:               string
+  tool_name:        string
+  input:            Record<string, unknown>
+  output:           unknown
+  status:           'ok' | 'error' | 'denied'
+  duration_ms:      number
+  definition_slug?: string | null   // test the agent was executing (manual sessions)
+  created_at:       string
+}
+
+/** One auto-captured step in a verdict's execution trail (evidence.execution_trail) */
+export interface TrailStep {
+  tool:           string
+  target:         string          // e.g. 'application (advance)', 'node:jsonrpc-api', 'anvil (L1 tx)'
+  status:         string
+  input?:         unknown
+  output?:        unknown
+  invocation_id?: string          // deep-link into ai.tool_invocations
+  duration_ms?:   number
+  at?:            string
+}
+
+/** Matches ai.test_verdicts row — the agent's own judgment for a manually executed test */
+export interface TestVerdict {
+  verdict_id:      string
+  definition_slug: string
+  verdict:         AIVerdict
+  reasoning:       string
+  inputs_used?:    Record<string, unknown>
+  evidence?:       Record<string, unknown>
+  duration_ms?:    number
+  created_at:      string
+  // Trust / validation (migration 0015)
+  confidence?:           number | null
+  evidence_validated?:   boolean
+  validation_notes?:     string | null
+  auto_downgraded_from?: string | null
+  trail_step_count?:     number | null
+  trail_mutating_count?: number | null
+  trail_truncated?:      boolean
+  observations?:         unknown
+  // Provenance
+  model_id?:           string | null
+  model_params?:       Record<string, unknown> | null
+  release_tag?:        string | null
+  image_tag?:          string | null
+  contracts_version?:  string | null
+  definition_snapshot?: Record<string, unknown> | null
+}
+
+/** Matches ai.test_plans row — the agent's persisted understanding + plan */
+export interface TestPlan {
+  plan_id:          string
+  definition_slug:  string
+  objective?:       string
+  success_criteria?: string | null
+  failure_criteria?: string | null
+  planned_steps?:   unknown
+  created_at:       string
 }
 
 export interface SuggestedAction {
@@ -285,7 +344,7 @@ export type WSEventType =
   | 'sandbox.step'
   | 'test.started' | 'test.completed' | 'test.failed'
   | 'run.queued' | 'run.started' | 'run.completed' | 'run.failed' | 'run.cancelled'
-  | 'ai.token' | 'ai.tool_call' | 'ai.tool_result' | 'ai.finding' | 'ai.completed'
+  | 'ai.token' | 'ai.tool_call' | 'ai.tool_result' | 'ai.finding' | 'ai.verdict' | 'ai.completed'
 
 export interface WSEvent {
   event_type:  WSEventType | string

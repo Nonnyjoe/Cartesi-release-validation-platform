@@ -2,7 +2,7 @@ import type {
   Run, RunReport, RunEvent, RunLogLine, TestDefinition, PhaseGroup, Sandbox,
   AISession, SuggestedAction, PaginatedResponse, QueueDepths,
   ReleaseEntry, CliRelease, SdkRelease, ContractsRelease,
-  Application, ToolInvocation,
+  Application, ToolInvocation, TestVerdict, TestPlan,
 } from './types'
 
 const BASE = '/api'
@@ -107,6 +107,10 @@ export const sessionsApi = {
     run_id?:            string
     goal?:              string
     sandbox_id?:        string
+    execution_mode?:    string
+    selected_tests?:    string[]
+    selected_phases?:   string[]
+    bootstrap?:         boolean
     anthropic_api_key:  string
     model_id?:          string
   }) => request<AISession>('/sessions', { method: 'POST', body: JSON.stringify(payload) }),
@@ -119,6 +123,10 @@ export const sessionsApi = {
     request<{ ok: boolean }>(`/sessions/${id}/cancel`, { method: 'POST' }),
   tools: (id: string, limit = 200) =>
     request<ToolInvocation[]>(`/sessions/${id}/tools?limit=${limit}`),
+  verdicts: (id: string) =>
+    request<TestVerdict[]>(`/sessions/${id}/verdicts`),
+  plans: (id: string) =>
+    request<TestPlan[]>(`/sessions/${id}/plans`),
   suggestions: (sessionId?: string) => {
     const q = sessionId ? `?session_id=${sessionId}` : ''
     return request<SuggestedAction[]>(`/sessions/suggestions${q}`)

@@ -222,9 +222,29 @@ class SandboxEventConsumer:
             run = run_row.fetchone()
             suite_ids          = run.suite_ids  if run else None
             node_major_version = run.node_major_version if run else 1
-            run_metadata       = run.metadata or {} if run else {}
+            # metadata may be a JSON scalar/array on legacy rows — only trust objects.
+            run_metadata       = run.metadata if (run and isinstance(run.metadata, dict)) else {}
             tags_filter      = run_metadata.get("tags_filter")      # e.g. ["restart"]
             category_filter  = run_metadata.get("category_filter")   # e.g. ["CLI - doctor"]
+
+            # AI-session bootstrap runs exist solely to provision a sandbox for
+            # an agent — no bulk test sweep. The sandbox-manager keeps the
+            # sandbox alive for the session's lifetime instead of the backlog's.
+            if run_metadata.get("ai_session"):
+                log.info("Run %s is an AI-session bootstrap — skipping test dispatch", run_id)
+                await db.execute(
+                    text("""
+                        UPDATE orchestrator.runs
+                        SET metadata = (CASE WHEN metadata IS NULL
+                                               OR jsonb_typeof(metadata) <> 'object'
+                                             THEN '{}'::jsonb ELSE metadata END)
+                                       || jsonb_build_object('dispatched_count', 0)
+                        WHERE id = :id
+                    """),
+                    {"id": run_id},
+                )
+                await db.commit()
+                return
             # app_address is set by sandbox_queue consumer after deploy; also forwarded
             # from sandbox_msg so we always have the most up-to-date value.
             app_address = (sandbox_msg.get("app_address")
@@ -322,10 +342,14 @@ class SandboxEventConsumer:
                  dispatched, run_id, node_major_version)
 
         async with AsyncSessionLocal() as db:
+            # CASE sanitization: metadata may be JSON null (ORM None) — `null || obj`
+            # array-concats in Postgres instead of merging.
             await db.execute(
                 text("""
                     UPDATE orchestrator.runs
-                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                    SET metadata = (CASE WHEN metadata IS NULL
+                                           OR jsonb_typeof(metadata) <> 'object'
+                                         THEN '{}'::jsonb ELSE metadata END)
                                    || jsonb_build_object('dispatched_count', CAST(:count AS int))
                     WHERE id = :id
                 """),

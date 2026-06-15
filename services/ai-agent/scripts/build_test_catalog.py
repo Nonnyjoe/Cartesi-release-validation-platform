@@ -1,13 +1,18 @@
 """Generate the test catalog markdown the agent reads at session start.
 
-Reads tests.definitions WHERE is_active AND ai_allowed=true and writes a structured markdown
-list to context/sources/project/test-catalog.md. Idempotent; safe to run on every container
-restart.
+The catalog now covers the full Tests-section inventory (~250 ai_allowed tests),
+so it is deliberately COMPACT: a phase-grouped slug list, no per-test detail.
+The agent loads any test's full definition on demand via `read_test_definition`;
+manual sessions additionally receive their selected tests (with names) in the
+work-plan message.
+
+Reads tests.definitions WHERE is_active AND ai_allowed=true and writes
+context/sources/project/test-catalog.md. Idempotent; safe to run on every
+container restart.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -15,20 +20,6 @@ from pathlib import Path
 import asyncpg
 
 OUT_PATH = Path(__file__).resolve().parent.parent / "context" / "sources" / "project" / "test-catalog.md"
-
-
-def _override_keys_for(parsed: dict) -> list[str]:
-    """Surface the leaf-level keys the agent can override via parameter_overrides."""
-    keys: set[str] = set()
-    for assertion in parsed.get("assertions", []) or []:
-        if not isinstance(assertion, dict):
-            continue
-        for k, v in assertion.items():
-            if k == "type":
-                continue
-            if isinstance(v, (str, int, float, bool)) or v is None:
-                keys.add(k)
-    return sorted(keys)
 
 
 async def main() -> None:
@@ -45,47 +36,48 @@ async def main() -> None:
     try:
         rows = await conn.fetch(
             """
-            SELECT slug, name, tags, component, priority, definition_parsed
+            SELECT COALESCE(phase, 'Unphased') AS phase, slug
             FROM tests.definitions
             WHERE is_active = true AND ai_allowed = true
-            ORDER BY component NULLS LAST, slug
+            ORDER BY phase, slug
             """,
         )
     finally:
         await conn.close()
 
     lines: list[str] = []
-    lines.append("# Whitelisted Test Catalog (auto-generated)")
+    lines.append("# Test Catalog (auto-generated, phase-grouped)")
     lines.append("")
     lines.append(
-        "These tests are flagged `ai_allowed: true` and may be invoked via the `trigger_test` "
-        "tool. For each one, you can pass `parameter_overrides` to change inputs.",
+        "Every test below is runnable by the agent. In MANUAL sessions you execute "
+        "them yourself with primitive tools; in runner sessions you may delegate via "
+        "`trigger_test`. Load any test's full definition (steps, assertions, expected "
+        "behaviour, override keys) with `read_test_definition(slug)` — do that before "
+        "executing a test, never guess its contents."
     )
     lines.append("")
 
     if not rows:
-        lines.append("_No whitelisted tests yet._")
+        lines.append("_No runnable tests yet._")
     else:
-        current_component = None
-        for r in rows:
-            comp = r["component"] or "uncategorized"
-            if comp != current_component:
-                lines.append(f"## {comp}")
+        current_phase = None
+        bucket: list[str] = []
+
+        def _flush():
+            if bucket:
+                # Comma-joined slugs keep the catalog ~10x smaller than list items.
+                lines.append(", ".join(f"`{s}`" for s in bucket))
                 lines.append("")
-                current_component = comp
-            slug = r["slug"]
-            name = r["name"]
-            tags = r["tags"] or []
-            parsed_val = r["definition_parsed"]
-            if isinstance(parsed_val, str):
-                parsed_val = json.loads(parsed_val)
-            override_keys = _override_keys_for(parsed_val or {})
-            tag_str = ", ".join(tags) if tags else "—"
-            override_str = ", ".join(f"`{k}`" for k in override_keys) if override_keys else "—"
-            lines.append(f"- **`{slug}`** — {name}")
-            lines.append(f"  - tags: {tag_str}")
-            lines.append(f"  - override keys: {override_str}")
-        lines.append("")
+                bucket.clear()
+
+        for r in rows:
+            if r["phase"] != current_phase:
+                _flush()
+                current_phase = r["phase"]
+                lines.append(f"## {current_phase}")
+                lines.append("")
+            bucket.append(r["slug"])
+        _flush()
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text("\n".join(lines) + "\n")

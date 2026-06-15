@@ -48,6 +48,32 @@ BINARY_ROUTES: dict[str, list[str]] = {
 
 TIMEOUT_S = 60.0
 
+# Defence-in-depth (review §15 Security): `bash`/`sh` are whitelisted for
+# legitimate recipes (env inspection, psql, curl), which is effectively arbitrary
+# execution inside the sandbox container. This denylist blocks the catastrophic /
+# blast-radius patterns outright. It is NOT a complete sandbox — full isolation
+# (a brokered exec proxy + dropping docker.sock) is a separate hardening track,
+# documented in the remediation log. Patterns are matched case-insensitively
+# against the full command string.
+import re as _re
+_DESTRUCTIVE_PATTERNS = [
+    _re.compile(p, _re.IGNORECASE) for p in (
+        r"\brm\s+-rf?\s+(/|\$|~|\*|\.\.)",   # rm -rf / | $VAR | ~ | * | ..
+        r"\bmkfs\b", r"\bdd\b.+\bof=/dev/", r":\s*\(\s*\)\s*\{",  # fork bomb
+        r">\s*/dev/sd", r"\bshutdown\b", r"\breboot\b", r"\bhalt\b",
+        r"\bchmod\s+-R\s+777\s+/", r"\b(curl|wget)\b.+\|\s*(ba)?sh\b",  # pipe-to-shell
+        r"\bdocker\b", r"/var/run/docker\.sock",   # no docker-in-docker escapes
+        r"\bnc\b\s+-l", r"\b(iptables|ip6tables)\b",
+    )
+]
+
+
+def _destructive(cmd: str) -> str | None:
+    for pat in _DESTRUCTIVE_PATTERNS:
+        if pat.search(cmd):
+            return pat.pattern
+    return None
+
 # Exit codes Docker/sh report when the executable itself can't be run
 _NOT_FOUND_EXITS = {126, 127}
 
@@ -113,6 +139,14 @@ async def run_cli_command(
             "success": False,
             "error": f"Binary {binary!r} not whitelisted. Allowed: {sorted(ALLOWED_BINARIES)}",
         }
+    # Block catastrophic shell patterns (bash/sh are dual-use; this is the
+    # blast-radius guardrail — see _DESTRUCTIVE_PATTERNS).
+    hit = _destructive(f"{binary} {args}")
+    if hit:
+        log.warning("run_cli_command BLOCKED destructive pattern %r in: %s %s", hit, binary, args[:120])
+        return {"success": False, "denied": True,
+                "error": f"Command blocked: matches a destructive-pattern guardrail ({hit}). "
+                         "This tool is for test execution, not host/container administration."}
     try:
         argv = [binary, *shlex.split(args)]
     except ValueError as exc:
